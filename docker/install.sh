@@ -3,7 +3,7 @@
 apt-get update -y
 apt-get install -y --no-install-recommends \
     software-properties-common wget curl ssh sudo \
-    git-core libibverbs1 ibverbs-providers ibverbs-utils librdmacm1 libibverbs-dev rdma-core
+    git-core libibverbs1 ibverbs-providers ibverbs-utils librdmacm1 libibverbs-dev rdma-core libmlx5-1
 add-apt-repository -y ppa:deadsnakes/ppa
 apt-get install -y --no-install-recommends \
     python${PYTHON_VERSION}-minimal python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv
@@ -26,3 +26,7 @@ rm -rf /var/lib/apt/lists/*
 export PATH=/opt/py3/bin:$PATH
 
 pip install /wheels/*.whl --extra-index-url https://download.pytorch.org/whl/${CUDA_VERSION_SHORT}
+
+if [[ "${CUDA_VERSION_SHORT}" != "cu118" ]]; then
+    pip install cuda-python dlblas
+fi
