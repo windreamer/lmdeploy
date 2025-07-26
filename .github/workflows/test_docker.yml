@@ -1,0 +1,38 @@
+name: test-docker
+
+on: [push]
+
+jobs:
+  test_docker_image:
+    runs-on: ubuntu-latest
+    environment: 'prod'
+    strategy:
+      matrix:
+        cuda_version: [cu12, cu11]
+    env:
+      CUDA_VERSION: ${{ matrix.cuda_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          ref: ${{github.event.inputs.repo_ref}}
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # This might remove tools that are actually needed, if set to "true" but frees about 6 GB
+          tool-cache: false
+          docker-images: false
+          # All of these default to true, but feel free to set to "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+      - name: Get docker info
+        run: |
+          docker info
+          # remove http extraheader
+          git config --local --unset "http.https://github.com/.extraheader"
+      - name: Build and push Docker image
+        run: |
+          docker build . -f docker/Dockerfile --build-arg CUDA_VERSION=${CUDA_VERSION}
