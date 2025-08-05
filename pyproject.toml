@@ -20,15 +20,54 @@ classifiers = [
 requires-python = ">= 3.9"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-dynamic = ["version", "readme", "dependencies", "optional-dependencies"]
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    "einops",
+    "fastapi",
+    "fire",
+    "mmengine-lite",
+    "numpy<2.0.0",
+    "openai",
+    "partial_json_parser",
+    "pillow",
+    "protobuf",
+    "pydantic>2.0.0",
+    "pyzmq",
+    "safetensors",
+    "sentencepiece",
+    "shortuuid",
+    "tiktoken",
+    "transformers",
+    "uvicorn",
+]
 
-[tool.setuptools.dynamic]
-version = {attr = "lmdeploy.version.__version__"}
-readme = {file = ["README.md"], content-type = "text/markdown"}
+[project.optional-dependencies]
+lite = [
+    "accelerate",
+    "datasets",
+    "transformers-stream-generator"
+]
+serve = [
+    "gradio",
+    "prometheus-client",
+    "protobuf"
+]
 
-[tool.setuptools.packages.find]
-namespaces = false
-exclude = []
+[tool.pdm.version]
+source = "file"
+path = "lmdeploy/version.py"
+
+[tool.pdm.build]
+includes = ["lmdeploy/"]
+source-includes = [
+    "cmake/",
+    "requirements/",
+    "src/",
+    "tests/",
+    "CMakeLists.txt",
+]
+run-setuptools = true
 
 [project.scripts]
 lmdeploy = "lmdeploy.cli:run"
@@ -36,7 +75,24 @@ lmdeploy = "lmdeploy.cli:run"
 [build-system]
 requires = [
     "cmake_build_extension",
-	"pybind11 <= 2.13.1",
-	"setuptools >= 77.0.3",
+    "packaging",
+    "pdm-backend",
+    "pybind11<=3.11.1",
 ]
-build-backend = "setuptools.build_meta"
+build-backend = "pdm.backend"
+
+
+[dependency-groups]
+test = [
+    "allure-pytest",
+    "coverage",
+    "nvidia-ml-py",
+    "pytest",
+    "pytest-assume",
+    "pytest-cov",
+    "pytest-order",
+    "pytest-rerunfailures",
+    "pytest-sugar",
+    "pytest-xdist",
+    "pyyaml",
+]

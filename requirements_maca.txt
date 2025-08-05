@@ -1,3 +1,0 @@
--r requirements/runtime_maca.txt
--r requirements/lite.txt
--r requirements/serve.txt
