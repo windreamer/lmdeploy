@@ -1,0 +1,61 @@
+# Base images
+
+ARG CUDA_VERSION=cu11.4
+
+FROM nvcr.io/nvidia/l4t-jetpack:r35.4.1 AS cu11.4
+ENV CUDA_VERSION_SHORT=cu114
+ENV CUDA_SUFFIX=11-4
+
+# Builder image
+FROM ${CUDA_VERSION} AS builder
+ARG PYTHON_VERSION=3.10
+ARG PYTORCH_VERSION=2.7.1
+
+ENV USE_XPU=0 \
+    USE_NCCL=0 \
+    USE_DISTRIBUTED=0 \
+    USE_FBGEMM=0 \
+    USE_NNPACK=1 \
+    USE_XNNPACK=1 \
+    USE_PYTORCH_QNNPACK=1 \
+    USE_BLAS=1 \
+    USE_CUFILE=0 \
+    BLAS="OpenBLAS" \
+    USE_PRIORITIZED_TEXT_FOR_LD=1 \
+    PYTORCH_BUILD_VERSION=${PYTORCH_VERSION} \
+    TORCH_CUDA_ARCH_LIST="6.2;7.2;8.7+PTX" \
+    PATH=/opt/py3/bin:/root/.local/bin:${PATH}
+
+RUN --mount=type=cache,target=/root/.cache \
+    wget -qO- https://astral.sh/uv/install.sh | sh && \
+    uv venv -p python3.10 --seed /opt/py3 && \
+    cd /tmp && \
+    apt update -y && \
+    apt-get install -y --no-install-recommends \
+        git libopenblas-dev && \
+    apt-get clean -y && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /wheels
+
+# Should be in the lmdeploy root directory when building docker image
+COPY . /opt/lmdeploy
+WORKDIR /opt/lmdeploy
+
+RUN --mount=type=cache,target=/root/.cache \
+    docker/build_pytorch_jetson.sh && \
+    cp /opt/torch*.whl /wheels && \
+    pip install build && \
+    python -m build -w -o /wheels -v .
+
+FROM ${CUDA_VERSION} AS final
+
+COPY --from=builder /root/.local /root/.local
+COPY --from=builder /opt/py3 /opt/py3
+
+ENV PATH=/opt/py3/bin:/root/.local/bin:${PATH}
+
+RUN --mount=type=cache,target=/root/.cache \
+    --mount=type=cache,target=/wheels,from=builder,source=/wheels \
+    pip install /wheels/*.whl
+
+ENTRYPOINT []
