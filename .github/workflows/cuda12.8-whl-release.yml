@@ -53,11 +53,48 @@ jobs:
           retention-days: 1
           name: linux-${{ matrix.pyver }}
 
+  windows-build:
+    strategy:
+      matrix:
+        pyver: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    runs-on: windows-latest
+    steps:
+      - name: Set git for windows
+        run: |
+          git config --global core.longpaths true
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set up python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.pyver }}
+      - name: Install python packages
+        run: |
+          pip install build change-wheel-version
+      - name: Setup CUDA Toolkit
+        id: cuda-toolkit
+        shell: pwsh
+        run: ./builder/windows/setup_cuda.ps1
+        env:
+            INPUT_CUDA_VERSION: '12.8.1'
+      - name: Build wheel
+        run: |
+          python -m build --wheel -o build/wheel
+          Get-ChildItem -Path "build" -Filter "*.whl" | ForEach-Object { change_wheel_version $_.FullName --local-version cu128 --delete-old-wheel }
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          path: build/wheel/*
+          retention-days: 1
+          name: windows-${{ matrix.pyver }}
+
   publish:
     runs-on: ubuntu-latest
     environment: 'prod'
     needs:
       - linux-build
+      - windows-build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3

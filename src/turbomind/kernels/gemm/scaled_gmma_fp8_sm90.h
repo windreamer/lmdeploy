@@ -11,10 +11,44 @@
 
 namespace turbomind::gemm {
 
+namespace {
+
+template<int tile>
+struct select_gmma_operation;
+template<>
+struct select_gmma_operation<256> {
+    using type = cute::SM90::GMMA::MMA_64x256x32_F32E4M3E4M3_SS_TN<>;
+};
+template<>
+struct select_gmma_operation<224> {
+    using type = cute::SM90::GMMA::MMA_64x224x32_F32E4M3E4M3_SS_TN<>;
+};
+template<>
+struct select_gmma_operation<192> {
+    using type = cute::SM90::GMMA::MMA_64x192x32_F32E4M3E4M3_SS_TN<>;
+};
+template<>
+struct select_gmma_operation<160> {
+    using type = cute::SM90::GMMA::MMA_64x160x32_F32E4M3E4M3_SS_TN<>;
+};
+template<>
+struct select_gmma_operation<128> {
+    using type = cute::SM90::GMMA::MMA_64x128x32_F32E4M3E4M3_SS_TN<>;
+};
+template<>
+struct select_gmma_operation<96> {
+    using type = cute::SM90::GMMA::MMA_64x96x32_F32E4M3E4M3_SS_TN<>;
+};
+template<>
+struct select_gmma_operation<64> {
+    using type = cute::SM90::GMMA::MMA_64x64x32_F32E4M3E4M3_SS_TN<>;
+};
+
+}  // namespace
+
 template<int TILE_M, int TILE_N, int TILE_K, int BATCH_M, int BATCH_N, int PIPE_M, int PIPE_N>
 struct ScaledGmmaFP8_TN {
-
-    static constexpr auto select_gmma_operation()
+    static constexpr auto select_gmma_size()
     {
         static_assert(TILE_M % (BATCH_M * PIPE_M) == 0);
         static_assert(TILE_N % (BATCH_N * PIPE_N) == 0);
@@ -24,35 +58,33 @@ struct ScaledGmmaFP8_TN {
 
         static_assert(M % 64 == 0);
 
-        using namespace cute::SM90::GMMA;
-
         if constexpr (N % 256 == 0) {
-            return MMA_64x256x32_F32E4M3E4M3_SS_TN<>{};
+            return 256;
         }
         else if constexpr (N % 224 == 0) {
-            return MMA_64x224x32_F32E4M3E4M3_SS_TN<>{};
+            return 224;
         }
         else if constexpr (N % 192 == 0) {
-            return MMA_64x192x32_F32E4M3E4M3_SS_TN<>{};
+            return 192;
         }
         else if constexpr (N % 160 == 0) {
-            return MMA_64x160x32_F32E4M3E4M3_SS_TN<>{};
+            return 160;
         }
         else if constexpr (N % 128 == 0) {
-            return MMA_64x128x32_F32E4M3E4M3_SS_TN<>{};
+            return 128;
         }
         else if constexpr (N % 96 == 0) {
-            return MMA_64x96x32_F32E4M3E4M3_SS_TN<>{};
+            return 96;
         }
         else if constexpr (N % 64 == 0) {
-            return MMA_64x64x32_F32E4M3E4M3_SS_TN<>{};
+            return 64;
         }
         else {
             static_assert(N == 0, "unsupported configuration");
         }
     }
 
-    using Operation = decltype(select_gmma_operation());
+    using Operation = typename select_gmma_operation<select_gmma_size()>::type;
 
     static constexpr typename cute::MMA_Traits<Operation>::Shape_MNK OP_Shape{};
 
