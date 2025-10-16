@@ -55,6 +55,7 @@ struct RopeParam {
     int   dim;
     float factor;
     int   max_position_embeddings;
+    float partial_rotary_factor;
     // unique
     union {
         YarnRopeParam   yarn;
@@ -92,6 +93,7 @@ struct RopeKernelParam {
     int    dim;
     float  scale_factor;
     float  inv_factor;
+    int    partial_rotary_dims;
 
     YarnRopeKernelParam   yarn;
     Llama3RopeKernelParam llama3;
@@ -100,9 +102,11 @@ struct RopeKernelParam {
 
 inline void init_rope_kernel_param(const RopeParam& rope, RopeKernelParam& rope_kernel)
 {
-    rope_kernel.type         = rope.type;
-    rope_kernel.dim          = rope.dim;
-    rope_kernel.scale_factor = -std::log2(rope.base) / rope.dim;
+    rope_kernel.type                = rope.type;
+    rope_kernel.dim                 = rope.dim;
+    rope_kernel.scale_factor        = -std::log2(rope.base) / rope.dim;
+    rope_kernel.partial_rotary_dims = int(rope.dim * rope.partial_rotary_factor);
+
     if (rope.type == RopeType::kDynamic) {
         rope_kernel.inv_factor = 1.f;
     }

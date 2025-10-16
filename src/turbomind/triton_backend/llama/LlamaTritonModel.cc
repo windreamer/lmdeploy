@@ -351,12 +351,16 @@ LlamaTritonModel::LlamaTritonModel(std::string                            model_
     model_param_.qk_norm    = model_reader["qk_norm"].as<bool>();
     model_param_.group_size = model_reader["group_size"].as<int>(0);
 
+    model_param_.post_self_attn_norm = model_reader["post_self_attn_norm"].as<bool>();
+    model_param_.post_mlp_norm       = model_reader["post_mlp_norm"].as<bool>();
+
     attn_param_.softmax_scale = attention_reader["softmax_scale"].as<float>(0);
     // logn attn for qwen model
     attn_param_.use_logn_attn           = attention_reader["use_logn_attn"].as<int>(0);
     attn_param_.max_position_embeddings = attention_reader["max_position_embeddings"].as<int>(0);
     // rotary embedding parameters
     parse_rope_param(attention_reader["rope_param"], attn_param_.rope);
+    attn_param_.rope.partial_rotary_factor = model_reader["partial_rotary_factor"].as<float>();
 
     engine_param_.max_batch_size = engine_reader["max_batch_size"].as<int>(0);
     auto max_forward_token_num   = engine_reader["max_prefill_token_num"].as<int>(0);

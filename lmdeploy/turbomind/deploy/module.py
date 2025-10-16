@@ -78,12 +78,19 @@ class Module(ABC):
 
 
 class LayerNorm(Module):
+    extra_norm_weights = ['post_self_attn_layernorm.weight', 'post_mlp_layernorm.weight']
 
     def apply(self, i: int, r: BaseReader):
         attn_norm = r.attn_norm(i)
         ffn_norm = r.ffn_norm(i)
         self.model.save_split(attn_norm, f'layers.{i}.attention_norm.weight')
         self.model.save_split(ffn_norm, f'layers.{i}.ffn_norm.weight')
+
+        if hasattr(r, 'extra_norm'):
+            extra_norm = r.extra_norm(i)
+            for w in self.extra_norm_weights:
+                if w in extra_norm:
+                    self.model.save_split(extra_norm[w], f'layers.{i}.{w}')
 
 
 class Ffn(Module):

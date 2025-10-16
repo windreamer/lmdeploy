@@ -41,6 +41,8 @@ struct ModelParam {
     MLAParam mla;
     bool     qk_norm;
     int      tune_layer_num;
+    bool     post_self_attn_norm;
+    bool     post_mlp_norm;
 
     ActivationType act_type;
 

@@ -10,11 +10,14 @@ namespace turbomind {
 template<int N>
 __device__ void init_default(Array<float, N / 2>& inv_freq, int idx, RopeKernelParam& param)
 {
-    auto scale_factor = param.scale_factor;
-    auto inv_factor   = param.inv_factor;
+    auto scale_factor        = param.scale_factor;
+    auto inv_factor          = param.inv_factor;
+    auto partial_rotary_dims = param.partial_rotary_dims;
     PRAGMA_UNROLL
     for (int i = 0; i < N; i += 2) {
-        inv_freq[i / 2] = inv_factor * exp2f((idx + i) * scale_factor);
+        if (idx + i < partial_rotary_dims) {
+            inv_freq[i / 2] = inv_factor * exp2f((idx + i) * scale_factor);
+        }
     }
 }
 
@@ -23,31 +26,37 @@ __device__ void init_yarn(Array<float, N / 2>& inv_freq, int idx, RopeKernelPara
 {
     auto scale_factor            = param.scale_factor;
     auto inv_factor              = param.inv_factor;
+    auto partial_rotary_dims     = param.partial_rotary_dims;
     auto ramp_inv_factor_div_2   = param.yarn.ramp_inv_factor_div_2;
     auto ramp_inv_factor_mul_min = param.yarn.ramp_inv_factor_mul_min;
 
     PRAGMA_UNROLL
     for (int i = 0; i < N; i += 2) {
-        auto freq       = exp2f((idx + i) * scale_factor);
-        auto alpha      = (idx + i) * ramp_inv_factor_div_2 - ramp_inv_factor_mul_min;
-        alpha           = fmaxf(0.f, fminf(1.f, alpha));
-        inv_freq[i / 2] = freq - freq * alpha * (1.f - inv_factor);
+        if (idx + i < partial_rotary_dims) {
+            auto freq       = exp2f((idx + i) * scale_factor);
+            auto alpha      = (idx + i) * ramp_inv_factor_div_2 - ramp_inv_factor_mul_min;
+            alpha           = fmaxf(0.f, fminf(1.f, alpha));
+            inv_freq[i / 2] = freq - freq * alpha * (1.f - inv_factor);
+        }
     }
 }
 
 template<int N>
 __device__ void init_llama3(Array<float, N / 2>& inv_freq, int idx, RopeKernelParam& param)
 {
-    auto scale_factor = param.scale_factor;
-    auto inv_factor   = param.inv_factor;
-    auto alpha        = param.llama3.alpha;
-    auto beta         = param.llama3.beta;
+    auto scale_factor        = param.scale_factor;
+    auto inv_factor          = param.inv_factor;
+    auto partial_rotary_dims = param.partial_rotary_dims;
+    auto alpha               = param.llama3.alpha;
+    auto beta                = param.llama3.beta;
 
     PRAGMA_UNROLL
     for (int i = 0; i < N; i += 2) {
-        auto freq       = exp2f((idx + i) * scale_factor);
-        auto smooth     = fmaxf(0.f, fminf(1.f, alpha * freq - beta));
-        inv_freq[i / 2] = (1 - smooth) * freq * inv_factor + smooth * freq;
+        if (idx + i < partial_rotary_dims) {
+            auto freq       = exp2f((idx + i) * scale_factor);
+            auto smooth     = fmaxf(0.f, fminf(1.f, alpha * freq - beta));
+            inv_freq[i / 2] = (1 - smooth) * freq * inv_factor + smooth * freq;
+        }
     }
 }
 
@@ -105,12 +114,16 @@ struct FastRoPE {
     template<typename T>
     __device__ void apply(Array<T, N>& x, float timestep)
     {
+        auto partial_rotary_dims = param_.partial_rotary_dims;
+
         if (param_.type == RopeType::kMrope) {
             return apply_mrope(x, timestep);
         }
         // Most models apply rotary embedding in half precision
         PRAGMA_UNROLL
         for (int i = 0; i < N; i += 2) {
+            if (i >= partial_rotary_dims)
+                break;
             float c, s;
             sincosf(timestep * inv_freq_[i / 2], &s, &c);
             s *= attention_scaling_;
@@ -139,8 +152,12 @@ struct FastRoPE {
             tt = th = tw = (int)timestep + (*param_.mrope.position_delta);
         }
 
+        auto partial_rotary_dims = param_.partial_rotary_dims;
+
         PRAGMA_UNROLL
         for (int i = 0; i < N; i += 2) {
+            if (i >= partial_rotary_dims)
+                break;
             if (i + idx_ < section.x) {
                 timestep = (float)tt;
             }

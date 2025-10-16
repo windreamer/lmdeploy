@@ -85,6 +85,9 @@ class ModelConfig:
     topk_group: int = 1
     topk_method: str = 'greedy'
     moe_group_num: int = 1
+    post_self_attn_norm: bool = False
+    post_mlp_norm: bool = False
+    partial_rotary_factor: float = 1.0
     # MLA
     q_lora_rank: int = 0
     kv_lora_rank: int = 0

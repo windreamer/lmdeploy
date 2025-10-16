@@ -124,6 +124,16 @@ LlamaDecoderLayerWeight::LlamaDecoderLayerWeight(DataType           data_type,
     ffn_norm       = Tensor{{hidden_units_}, data_type_, kDEVICE};
     register_parameter("attention_norm.weight", self_attn_norm);
     register_parameter("ffn_norm.weight", ffn_norm);
+
+    if (model.post_self_attn_norm) {
+        post_self_attn_norm = Tensor{{hidden_units_}, data_type_, kDEVICE};
+        register_parameter("post_self_attn_layernorm.weight", self_attn_norm);
+    }
+
+    if (model.post_mlp_norm) {
+        post_mlp_norm = Tensor{{hidden_units_}, data_type_, kDEVICE};
+        register_parameter("post_mlp_layernorm.weight", self_attn_norm);
+    }
 }
 
 LlamaDecoderLayerWeight::~LlamaDecoderLayerWeight() = default;

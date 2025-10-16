@@ -52,6 +52,9 @@ public:
     std::unique_ptr<LlamaFfnWeight> ffn_weights;
     std::unique_ptr<MoeFfnWeight>   moe_weights;
 
+    Tensor post_self_attn_norm;
+    Tensor post_mlp_norm;
+
 private:
     int head_num_;
     int kv_head_num_;

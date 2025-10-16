@@ -167,6 +167,16 @@ void UnifiedDecoder::Forward(TensorMap& args, const std::vector<WeightType*>& we
                               weights.at(layer)->self_attn_weights.get(),
                               layer});
 
+        // TODO: invokeRMSNorm, post_self_attn_layernorm
+        if (weights.at(layer)->post_self_attn_norm) {
+            invokeRMSNorm(local_hidden_states,
+                          local_hidden_states,
+                          weights.at(layer)->post_self_attn_norm,
+                          rmsnorm_eps_,
+                          stream_);
+            sync_check_cuda_error();
+        }
+
         TM_DEBUG_TENSOR(local_hidden_states, Concat("attn_block", layer), 2);
 
         AllreduceResidualRMSnorm(global_hidden_states,
@@ -202,6 +212,13 @@ void UnifiedDecoder::Forward(TensorMap& args, const std::vector<WeightType*>& we
 
         if (moe_fwd_param) {
             moe_ffn_layer_->Combine(*moe_fwd_param);
+        }
+
+        // TODO: invokeRMSNorm, post_mlp_layernorm
+        if (weights.at(layer)->post_mlp_norm) {
+            invokeRMSNorm(
+                local_hidden_states, local_hidden_states, weights.at(layer)->post_mlp_norm, rmsnorm_eps_, stream_);
+            sync_check_cuda_error();
         }
 
         TM_DEBUG_TENSOR(global_hidden_states, Concat("ffn_block", layer), 2);

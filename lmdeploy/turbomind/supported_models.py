@@ -53,6 +53,7 @@ SUPPORTED_ARCHS = dict(
     # chatglm2/3, glm4
     ChatGLMModel='glm4',
     ChatGLMForConditionalGeneration='glm4',
+    Glm4ForCausalLM='glm4-0414',
     # mixtral
     MixtralForCausalLM='mixtral',
     MolmoForCausalLM='molmo',
