@@ -47,6 +47,9 @@ class GenOut:
 
     # for disaggregation
     cache_block_ids: List[int] = None
+    
+    # for DLLM
+    step_map: List[int] = None
 
 
 def _gen_out_to_response(out: GenOut, index) -> Response:
@@ -58,6 +61,7 @@ def _gen_out_to_response(out: GenOut, index) -> Response:
                     logprobs=out.logprobs,
                     last_hidden_state=out.last_hidden_state,
                     logits=out.logits,
+                    step_map=out.step_map,
                     index=index)
 
 
@@ -75,6 +79,9 @@ def _append_response(dst: Response, src: Response):
     if src.logprobs:
         dst.logprobs = dst.logprobs or []
         dst.logprobs += src.logprobs
+    if src.step_map:
+        dst.step_map = dst.step_map or []
+        dst.step_map += src.step_map
     return dst
 
 
@@ -824,6 +831,11 @@ class AsyncEngine(LogitsMixin):
                     mask = slice(prev_len - output_len, output_len - hit_stop_token)
                     token_ids += outputs.token_ids[mask]
                     gen_len = len(token_ids) - input_len
+                    
+                    # 提取本次增量的 step_map
+                    step_map_increment = None
+                    if hasattr(outputs, 'step_map') and outputs.step_map is not None:
+                        step_map_increment = outputs.step_map[mask]
 
                     prev_len = output_len
 
@@ -841,7 +853,8 @@ class AsyncEngine(LogitsMixin):
                                  gen_len,
                                  finish_reason,
                                  token_ids=res,
-                                 cache_block_ids=outputs.cache_block_ids)
+                                 cache_block_ids=outputs.cache_block_ids,
+                                 step_map=step_map_increment)
 
                     if outputs.logprobs is not None:
                         log_offset = ids_offset - start_ids_offset
@@ -879,6 +892,10 @@ class AsyncEngine(LogitsMixin):
                     logger.info(f'session {session_id} finished, reason '
                                 f'"{finish_reason}", input_tokens '
                                 f'{len(input_ids)}, output_tokens {gen_len}')
+                    
+                    # 最后的 finish 输出不需要返回 step_map（已经在流式输出中累加了）
+                    final_step_map = None
+                    
                     yield GenOut(response,
                                  self.id2step[session_id],
                                  len(input_ids),
@@ -888,6 +905,7 @@ class AsyncEngine(LogitsMixin):
                                  logprobs=logprobs,
                                  logits=logits,
                                  last_hidden_state=last_hidden_state,
+                                 step_map=final_step_map,
                                  cache_block_ids=outputs.cache_block_ids)
                     # Update a session's sequence only when it is in finished status
                     if outputs.status == ResponseType.FINISH:
