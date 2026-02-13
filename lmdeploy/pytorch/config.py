@@ -301,6 +301,8 @@ class UnmaskingStrategy(enum.Enum):
     LOW_CONFIDENCE_DYNAMIC = enum.auto()
     # unmasking with topk in a block
     LOW_CONFIDENCE_STATIC = enum.auto()
+    # enhanced dynamic: if max score < 0.9, switch to static for remaining iterations
+    LOW_CONFIDENCE_DYNAMIC_ENHANCED = enum.auto()
 
     @classmethod
     def from_str(cls, strategy: str):
@@ -312,6 +314,8 @@ class UnmaskingStrategy(enum.Enum):
             return cls.LOW_CONFIDENCE_DYNAMIC
         elif strategy == 'low_confidence_static':
             return cls.LOW_CONFIDENCE_STATIC
+        elif strategy == 'low_confidence_dynamic_enhanced':
+            return cls.LOW_CONFIDENCE_DYNAMIC_ENHANCED
         else:
             raise ValueError(f'Unknown unmasking strategy: {strategy}')
 

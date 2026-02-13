@@ -42,6 +42,8 @@ class SchedulerSequenceDLLM(SchedulerSequenceDefault):
         self._num_valid_ids: int = len(self.history_cache)
         self._strategy: DLLMSequenceStrategy = self._seq_meta.strategy
         self._current_step: int = 0  # 当前解码步数
+        self._stop_pos: int = None  # EOS 位置标记
+        self._should_stop_after_block: bool = False  # 标记是否在当前 block 完成后停止
 
     @property
     def dllm_mask(self):
@@ -84,10 +86,16 @@ class SchedulerSequenceDLLM(SchedulerSequenceDefault):
         return self._strategy.dllm_mask_token
 
     def set_stop_pos(self, pos: int):
+        """Mark stop position but don't truncate current block.
+        The block will finish generation completely, and stop at next block."""
         dllm_block_length = self.dllm_block_length
-        val = dllm_block_length - pos - 1
-        self._num_valid_ids -= val
-        self.num_new_tokens -= val
+        # 只做标记，不截断当前 block
+        self._stop_pos = pos
+        self._should_stop_after_block = True
+        # 注释掉原来的截断逻辑
+        # val = dllm_block_length - pos - 1
+        # self._num_valid_ids -= val
+        # self.num_new_tokens -= val
 
     def _update_token_ids_inputs(self, token_ids: np.ndarray, dllm_mask: np.ndarray):
         """Append tokens."""
@@ -178,6 +186,11 @@ class SchedulerSequenceDLLM(SchedulerSequenceDefault):
             self.num_new_tokens += num_new
 
         if is_cached:
+            # 如果标记了应该停止，则不添加新 block
+            if self._should_stop_after_block:
+                # 当前 block 已完成，不再添加新 block，让 scheduler 知道应该停止了
+                return
+            
             # add new block
             new_token_ids = np.full_like(token_ids, dllm_mask_token, shape=(dllm_block_length, ))
             new_dllm_mask = np.full_like(dllm_mask, DLLM_MASKED, shape=(dllm_block_length, ))

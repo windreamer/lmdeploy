@@ -304,6 +304,8 @@ class CompletionRequest(BaseModel):
     seed: Optional[int] = None
     min_p: float = 0.0
     return_token_ids: Optional[bool] = False
+    dllm_confidence_threshold: Optional[float] = None  # dynamic threshold for DLLM
+    bad_words: Optional[Union[List[str], List[int]]] = None  # words or token ids to suppress
 
 
 class CompletionResponseChoice(BaseModel):
@@ -312,7 +314,11 @@ class CompletionResponseChoice(BaseModel):
     text: str
     logprobs: Optional[LogProbs] = None
     gen_tokens: Optional[List[int]] = None
+    token_ids: Optional[List[int]] = None  # alias for gen_tokens
     finish_reason: Optional[Literal['stop', 'length', 'tool_calls', 'error']] = None
+    step_map: Optional[List[int]] = None
+    input_ids: Optional[List[int]] = None
+    generation_time: Optional[float] = None  # generation time in seconds
 
 
 class CompletionResponse(BaseModel):
@@ -331,7 +337,11 @@ class CompletionResponseStreamChoice(BaseModel):
     text: str
     logprobs: Optional[LogProbs] = None
     gen_tokens: Optional[List[int]] = None
+    token_ids: Optional[List[int]] = None  # alias for gen_tokens
     finish_reason: Optional[Literal['stop', 'length', 'tool_calls', 'error']] = None
+    step_map: Optional[List[int]] = None
+    input_ids: Optional[List[int]] = None
+    generation_time: Optional[float] = None  # generation time in seconds
 
 
 class CompletionStreamResponse(BaseModel):

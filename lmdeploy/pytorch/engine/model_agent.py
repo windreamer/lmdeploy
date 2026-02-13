@@ -1010,7 +1010,17 @@ class BaseModelAgent:
             if isinstance(serialized_data, list):
                 serialized_data = serialized_data[self.dist_ctx.tp_rank]
             weights = ForkingPickler.loads(base64.b64decode(serialized_data))
-            weights = [(k, _construct(v)) for k, v in weights]
+            
+            # Handle both flattened tensor format and regular format
+            if isinstance(weights, dict) and 'flattened_tensor' in weights and 'metadata' in weights:
+                # Flattened tensor format
+                flattened_tensor = _construct(weights['flattened_tensor'])
+                weights = [(meta.name, flattened_tensor[meta.start_idx:meta.end_idx].view(meta.shape)) 
+                          for meta in weights['metadata']]
+            else:
+                # Regular format: list of (k, v) tuples
+                weights = [(k, _construct(v)) for k, v in weights]
+            
             self.patched_model.get_model().load_weights(weights)
 
             if request.finished:
@@ -1027,6 +1037,7 @@ class BaseModelAgent:
         self.cache_engine = None
         self.reset_graph_runner()
         device = 'cpu' if level == 1 else 'meta'
+        # print(f"sleep {level} 被执行了")
         self.patched_model.get_model().to(device=device)
         torch.cuda.empty_cache()
 

@@ -54,6 +54,7 @@ class VariableInterface:
     """A IO interface maintaining variables."""
     async_engine: AsyncEngine = None
     session_id: int = 0
+    session_id_lock: asyncio.Lock = None
     api_keys: Optional[List[str]] = None
     request_hosts = []
     # following are for registering to proxy server
@@ -357,15 +358,31 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
     preserve_cache = json_request.pop('preserve_cache', False)
     if migration_request:
         migration_request = MigrationRequest.model_validate(migration_request)
-
+    print(request.session_id)
     if request.session_id == -1:
-        VariableInterface.session_id += 1
-        request.session_id = VariableInterface.session_id
+        # 根据prompt数量预留足够的连续可用session_id
+        num_prompts = len(request.prompt) if isinstance(request.prompt, list) else 1
+        async with VariableInterface.session_id_lock:
+            # 循环查找连续可用的session_id
+            while True:
+                VariableInterface.session_id += 1
+                start_id = VariableInterface.session_id
+                # 检查从start_id开始的num_prompts个id是否都可用
+                all_available = True
+                for i in range(num_prompts):
+                    sid = start_id + i
+                    if (VariableInterface.async_engine.id2step.get(sid, 0) != 0 or 
+                        sid in VariableInterface.async_engine.id2inst):
+                        all_available = False
+                        VariableInterface.session_id = sid  # 跳到冲突的位置
+                        break
+                if all_available:
+                    request.session_id = start_id
+                    VariableInterface.session_id = start_id + num_prompts - 1
+                    break
     error_check_ret = await check_request(request)
     if error_check_ret is not None:
         return error_check_ret
-    if VariableInterface.async_engine.id2step.get(request.session_id, 0) != 0:
-        return create_error_response(HTTPStatus.BAD_REQUEST, f'The session_id `{request.session_id}` is occupied.')
 
     model_name = request.model
     adapter_name = None
@@ -421,6 +438,7 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
         migration_request=migration_request,
         with_cache=with_cache,
         preserve_cache=preserve_cache,
+        dllm_confidence_threshold=request.dllm_confidence_threshold,
     )
 
     tools = None
@@ -711,13 +729,29 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
         migration_request = MigrationRequest.model_validate(migration_request)
 
     if request.session_id == -1:
-        VariableInterface.session_id += 1
-        request.session_id = VariableInterface.session_id
+        # 根据prompt数量预留足够的连续可用session_id
+        num_prompts = len(request.prompt) if isinstance(request.prompt, list) else 1
+        async with VariableInterface.session_id_lock:
+            # 循环查找连续可用的session_id
+            while True:
+                VariableInterface.session_id += 1
+                start_id = VariableInterface.session_id
+                # 检查从start_id开始的num_prompts个id是否都可用
+                all_available = True
+                for i in range(num_prompts):
+                    sid = start_id + i
+                    if (VariableInterface.async_engine.id2step.get(sid, 0) != 0 or 
+                        sid in VariableInterface.async_engine.id2inst):
+                        all_available = False
+                        VariableInterface.session_id = sid  # 跳到冲突的位置
+                        break
+                if all_available:
+                    request.session_id = start_id
+                    VariableInterface.session_id = start_id + num_prompts - 1
+                    break
     error_check_ret = await check_request(request)
     if error_check_ret is not None:
         return error_check_ret
-    if VariableInterface.async_engine.id2step.get(request.session_id, 0) != 0:
-        return create_error_response(HTTPStatus.BAD_REQUEST, f'The session_id `{request.session_id}` is occupied.')
 
     model_name = request.model
     adapter_name = None
@@ -742,6 +776,7 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
         repetition_penalty=request.repetition_penalty,
         ignore_eos=request.ignore_eos,
         stop_words=request.stop,
+        bad_words=request.bad_words,
         skip_special_tokens=request.skip_special_tokens,
         min_p=request.min_p,
         random_seed=random_seed,
@@ -837,8 +872,11 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
         nonlocal cache_block_ids, remote_token_ids
         final_logprobs = []
         final_token_ids = []
+        final_step_map = []
+        final_input_ids = None
         final_res = None
         text = ''
+        start_time = time.time()
         async for res in generator:
             if await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
@@ -852,6 +890,10 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
                 final_token_ids.extend(res.token_ids)
             if res.logprobs:
                 final_logprobs.extend(res.logprobs)
+            if res.step_map:
+                final_step_map.extend(res.step_map)
+            if res.input_ids:
+                final_input_ids = res.input_ids
 
         logprobs = None
         if request.logprobs and len(final_logprobs):
@@ -863,11 +905,16 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
                 spaces_between_special_tokens=gen_config.spaces_between_special_tokens)
 
         assert final_res is not None
+        generation_time = time.time() - start_time
         choice_data = CompletionResponseChoice(index=i,
                                                text=text,
                                                finish_reason=final_res.finish_reason,
                                                logprobs=logprobs,
-                                               gen_tokens=final_token_ids if request.return_token_ids else None)
+                                               gen_tokens=final_token_ids if request.return_token_ids else None,
+                                               token_ids=final_token_ids if final_token_ids else None,
+                                               step_map=final_step_map if final_step_map else None,
+                                               input_ids=final_input_ids,
+                                               generation_time=generation_time)
         choices[i] = choice_data
 
         if with_cache:
@@ -1165,6 +1212,10 @@ def create_lifespan_handler(backend_config: Union[PytorchEngineConfig, Turbomind
 
     @asynccontextmanager
     async def lifespan_handler(app: FastAPI):
+        # 初始化session_id锁
+        if VariableInterface.session_id_lock is None:
+            VariableInterface.session_id_lock = asyncio.Lock()
+        
         task = None
         try:
             if getattr(backend_config, 'enable_metrics', False):
@@ -1286,6 +1337,7 @@ def serve(model_path: str,
     _, pipeline_class = get_task(model_path)
     if isinstance(backend_config, PytorchEngineConfig):
         backend_config.enable_mp_engine = True
+        backend_config.distributed_executor_backend='ray'
     VariableInterface.async_engine = pipeline_class(model_path=model_path,
                                                     model_name=model_name,
                                                     backend=backend,

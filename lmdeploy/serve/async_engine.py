@@ -32,57 +32,6 @@ from lmdeploy.utils import _get_and_verify_max_len, _stop_words, get_hf_gen_cfg,
 logger = get_logger('lmdeploy')
 
 
-def _merge_message_content(msg: Dict) -> Dict:
-    """Merge multimodal content blocks and ensure content field exists.
-
-    This function normalizes message content to match vLLM's behavior:
-    1. Missing content field -> add content='' (empty string)
-    2. None content -> convert to content='' (empty string)
-    3. String content -> return as-is
-    4. List content (multimodal) -> merge all text blocks with newline separator
-
-    Args:
-        msg: A message dict with 'role' and optionally 'content' field
-
-    Returns:
-        A message dict with 'content' field guaranteed to exist
-
-    Note:
-        This implementation is based on vLLM's content processing logic.
-        vLLM uses "\n".join() to merge multiple text blocks from multimodal content.
-
-    References:
-        - vLLM content normalization:
-          https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/chat_utils.py
-          See _parse_chat_message_content() and _parse_chat_message_content_parts()
-        - vLLM text merging logic:
-          text_prompt = "\n".join(texts)
-    """
-    # If content is missing or None, convert to empty string (matches vLLM behavior)
-    # This prevents Jinja2 template errors when rendering chat templates
-    if 'content' not in msg or msg['content'] is None:
-        result = dict(msg)
-        result['content'] = ''
-        return result
-
-    # If content is already a string, return as-is
-    if isinstance(msg['content'], str):
-        return msg
-
-    # If content is a list, merge all text blocks into a single string
-    # This matches vLLM's behavior: text_prompt = "\n".join(texts)
-    content_parts = []
-    for block in msg['content']:
-        if isinstance(block, dict) and block.get('type') == 'text':
-            content_parts.append(block.get('text', ''))
-    merged_content = '\n'.join(content_parts)
-
-    # Preserve all other fields in the message (e.g., tool_calls)
-    result = dict(msg)
-    result['content'] = merged_content
-    return result
-
-
 @dataclasses.dataclass
 class GenOut:
     """Pack all response information together."""
@@ -101,6 +50,7 @@ class GenOut:
     
     # for DLLM
     step_map: List[int] = None
+    input_ids: List[int] = None
 
 
 def _gen_out_to_response(out: GenOut, index) -> Response:
@@ -770,6 +720,13 @@ class AsyncEngine(LogitsMixin):
         if gen_config.stop_token_ids is None:
             gen_config.stop_token_ids = self.stop_words
         gen_config.update_from_hf_gen_cfg(self.hf_gen_cfg, self.tokenizer.eos_token_id)
+        
+        # Update DLLM dynamic threshold if provided
+        if gen_config.dllm_confidence_threshold is not None:
+            if hasattr(self.engine, 'model_agent') and hasattr(self.engine.model_agent, 'misc_config'):
+                if hasattr(self.engine.model_agent.misc_config, 'dllm_config') and self.engine.model_agent.misc_config.dllm_config is not None:
+                    self.engine.model_agent.misc_config.dllm_config.confidence_threshold = gen_config.dllm_confidence_threshold
+        
         if not gen_config.do_sample:
             # greedy decode
             gen_config.top_k = 1
@@ -815,7 +772,7 @@ class AsyncEngine(LogitsMixin):
             gen_config.max_new_tokens = max(0, self.session_len - self.id2step[session_id] - len(input_ids))
             if gen_config.max_new_tokens == 0:
                 logger.error(f'run out of tokens. session={session_id}.')
-                yield GenOut('', self.id2step[session_id], len(input_ids), 0, 'length')
+                yield GenOut('', self.id2step[session_id], len(input_ids), 0, 'length', input_ids=input_ids)
                 if sequence_end is True and sequence_start is False:
                     await self.end_session(session_id)
                 return
@@ -828,7 +785,8 @@ class AsyncEngine(LogitsMixin):
                          input_token_len=len(input_ids),
                          generate_token_len=0,
                          finish_reason='error',
-                         token_ids=[])
+                         token_ids=[],
+                         input_ids=input_ids)
             return
 
         def is_error(status):
@@ -873,13 +831,16 @@ class AsyncEngine(LogitsMixin):
                         continue
 
                     # This assumes the engine will stop when stop token is hit
+                    should_include_stop = (not gen_config.skip_special_tokens) or gen_config.include_stop_str_in_output
                     if output_len and outputs.token_ids[-1] in stop_ids:
                         hit_stop_token = 1
                         # one token and it's been skipped
-                        if output_len == prev_len + 1:
+                        if output_len == prev_len + 1 and not should_include_stop:
                             continue
 
-                    mask = slice(prev_len - output_len, output_len - hit_stop_token)
+                    # Include stop token if skip_special_tokens=False or include_stop_str_in_output=True
+                    mask_end_offset = 0 if should_include_stop else hit_stop_token
+                    mask = slice(prev_len - output_len, output_len - mask_end_offset)
                     token_ids += outputs.token_ids[mask]
                     gen_len = len(token_ids) - input_len
                     
@@ -905,20 +866,21 @@ class AsyncEngine(LogitsMixin):
                                  finish_reason,
                                  token_ids=res,
                                  cache_block_ids=outputs.cache_block_ids,
-                                 step_map=step_map_increment)
+                                 step_map=step_map_increment,
+                                 input_ids=input_ids)
 
                     if outputs.logprobs is not None:
                         log_offset = ids_offset - start_ids_offset
                         out.logprobs = outputs.logprobs[log_offset:]
-                        if hit_stop_token:
+                        if hit_stop_token and not should_include_stop:
                             out.logprobs = out.logprobs[:-hit_stop_token]
                     if outputs.last_hidden_state is not None:
                         out.last_hidden_state = outputs.last_hidden_state
-                        if hit_stop_token:
+                        if hit_stop_token and not should_include_stop:
                             out.last_hidden_state = out.last_hidden_state[:-hit_stop_token]
                     if outputs.logits is not None:
                         out.logits = outputs.logits
-                        if hit_stop_token:
+                        if hit_stop_token and not should_include_stop:
                             out.logits = out.logits[:-hit_stop_token]
 
                     yield out
@@ -932,13 +894,17 @@ class AsyncEngine(LogitsMixin):
                         # avoid returning the last response twice
                         response = ''
                     token_ids, logits, last_hidden_state, logprobs = [], None, None, None
-                    if gen_config.include_stop_str_in_output and finish_reason == 'stop':
-                        # return the eos token id (MUST be in a list), eos string, eos token's logits and so on
-                        token_ids = outputs.token_ids[-1:]
-                        response = self.tokenizer.decode(token_ids, skip_special_tokens=False)
-                        logits = outputs.logits[-1:] if outputs.logits else None
-                        last_hidden_state = outputs.last_hidden_state[-1:] if outputs.last_hidden_state else None
-                        logprobs = outputs.logprobs[-1:] if outputs.logprobs else None
+                    # NOTE: 这段代码原本有bug，条件永远不会满足，所以注释掉
+                    # 如果用户想要EOS token (should_include_stop=True)，它已经在流式输出中包含了
+                    # 如果用户不想要EOS token (should_include_stop=False)，就不应该在这里加
+                    # should_include_stop = (not gen_config.skip_special_tokens) or gen_config.include_stop_str_in_output
+                    # if not should_include_stop and gen_config.include_stop_str_in_output and finish_reason == 'stop':
+                    #     # return the eos token id (MUST be in a list), eos string, eos token's logits and so on
+                    #     token_ids = outputs.token_ids[-1:]
+                    #     response = self.tokenizer.decode(token_ids, skip_special_tokens=False)
+                    #     logits = outputs.logits[-1:] if outputs.logits else None
+                    #     last_hidden_state = outputs.last_hidden_state[-1:] if outputs.last_hidden_state else None
+                    #     logprobs = outputs.logprobs[-1:] if outputs.logprobs else None
 
                     logger.info(f'session {session_id} finished, reason '
                                 f'"{finish_reason}", input_tokens '
@@ -957,7 +923,8 @@ class AsyncEngine(LogitsMixin):
                                  logits=logits,
                                  last_hidden_state=last_hidden_state,
                                  step_map=final_step_map,
-                                 cache_block_ids=outputs.cache_block_ids)
+                                 cache_block_ids=outputs.cache_block_ids,
+                                 input_ids=input_ids)
                     # Update a session's sequence only when it is in finished status
                     if outputs.status == ResponseType.FINISH:
                         if rewind_stop_tokens:
@@ -972,7 +939,8 @@ class AsyncEngine(LogitsMixin):
                                  input_token_len=len(input_ids),
                                  generate_token_len=0,
                                  finish_reason='error',
-                                 token_ids=[])
+                                 token_ids=[],
+                                 input_ids=input_ids)
             # update step
             if sequence_end:
                 self.id2step[session_id] = 0

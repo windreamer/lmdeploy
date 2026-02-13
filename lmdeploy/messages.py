@@ -63,7 +63,7 @@ class GenerationConfig:
             around special tokens. The behavior of Fast tokenizers is to have
             this to False. This is setup to True in slow tokenizers.
         logprobs (int): Number of log probabilities to return per output token.
-        response_format (Dict): Generate responses according to given formatting.
+        response_format (Dict): Only pytorch backend support formatting
         response. Examples:
             {
                 "type": "json_schema",
@@ -116,6 +116,9 @@ class GenerationConfig:
     with_cache: bool = False
     preserve_cache: bool = False
     migration_request: Optional[MigrationRequest] = None
+    
+    # for DLLM dynamic threshold
+    dllm_confidence_threshold: Optional[float] = None
 
     def convert_stop_bad_words_to_ids(self, tokenizer: Tokenizer):
         """Convert stop_words/bad_sords to ids and append the ids to

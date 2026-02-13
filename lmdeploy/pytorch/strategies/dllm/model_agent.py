@@ -87,7 +87,9 @@ class DLLMStoppingCriteria(StoppingCriteria):
 
         # check stop by num_new_tokens
         num_appendable_ids -= is_unmasked * block_size
-        stopped = num_appendable_ids <= 0
+        
+        # 初始化为不停止，只有在 block 完全 unmasked 时才检查是否应该停止
+        stopped = torch.zeros(batch_size, dtype=torch.bool, device=num_appendable_ids.device)
         stop_pos = block_size - 1 + num_appendable_ids
 
         # check stop words
@@ -100,6 +102,10 @@ class DLLMStoppingCriteria(StoppingCriteria):
                                                                           num_appendable_ids,
                                                                           output_start_pos=output_start_pos,
                                                                           inputs=inputs)
+        
+        # 只有当 block 完全 unmasked 时，才真正检查长度停止条件
+        length_stopped = num_appendable_ids <= 0
+        stopped = stopped | (length_stopped & is_unmasked)
 
         new_stopping = DLLMStoppingCriteria(num_appendable_ids=num_appendable_ids, output_start_pos=output_start_pos)
         return stopped, stop_pos, new_stopping

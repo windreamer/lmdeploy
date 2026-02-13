@@ -158,7 +158,7 @@ def serve(model_path: str,
                                api_keys=api_keys,
                                ssl=ssl,
                                **kwargs),
-                   daemon=True)
+                   daemon=False)
     task.start()
     client = APIClient(f'http://{server_name}:{server_port}')
     while True:
