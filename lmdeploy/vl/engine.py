@@ -86,17 +86,19 @@ class ImageEncoder:
         Args:
             messages (list[dict]): a list of message, which is supposed to be
                 the output of `preprocess`
+
         Returns:
-            a dict which will be passed to pytorch engine_instance's forward.
-            The dict is like the following:
-            dict(
-                'prompt': 'the prompt after applying chat template'
-                'input_ids': [],
-                'multimodal': {
-                    'pixel_values': torch.Tensor,
-                    ...
-                ]
-            )
+            list[dict]: a list of dicts passed to pytorch engine_instance's forward.
+                Each dict has the following structure::
+
+                    {
+                        'prompt': 'the prompt after applying chat template',
+                        'input_ids': [],
+                        'multimodal': {
+                            'pixel_values': torch.Tensor,
+                            ...
+                        },
+                    }
         """
         has_input_ids = self.model.has_input_ids(messages)
         if not has_input_ids:
@@ -127,15 +129,18 @@ class ImageEncoder:
         Args:
             messages (list[dict]): a list of message, which is supposed to be
                 the output of `async_infer`
+
         Returns:
-            a dict which will be passed to pytorch engine_instance's forward.
-            The dict is like the following:
-            dict(
-                'prompt': 'the prompt after applying chat template'
-                'input_ids': [],
-                'input_embeddings': list[torch.Tensor],
-                'input_embedding_ranges': list[torch.Tensor],
-                ...
+            dict: a dict passed to turbomind engine_instance's forward.
+                The dict has the following structure::
+
+                    {
+                        'prompt': 'the prompt after applying chat template',
+                        'input_ids': [],
+                        'input_embeddings': list[torch.Tensor],
+                        'input_embedding_ranges': list[torch.Tensor],
+                        ...
+                    }
         """
         result = self.model.to_turbomind(messages,
                                          chat_template,
