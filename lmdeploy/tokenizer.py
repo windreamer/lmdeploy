@@ -19,7 +19,7 @@ class DetokenizeState:
     Args:
         ids_offset (int): offset to all input ids. In LMDeploy, the output
             ids length is not one by one. It could be random by random.
-        prev_tokens (List[str] | None): for incrementally decoding.
+        prev_tokens (list[str] | None): for incrementally decoding.
             Default to None, which means the first round.
         prefix_offset (int): the start index of tokens to be converted to
             string (prev + new tokens). Default to 0 for the first round.
@@ -212,7 +212,7 @@ class HuggingFaceTokenizer:
         """De-tokenize.
 
         Args:
-            t (List[int]): a list of token ids
+            t (list[int]): a list of token ids
             offset (int): for incrementally decoding. Default to None, which
                 means not applied.
             skip_special_tokens (bool): Whether or not to remove special
@@ -272,7 +272,7 @@ class HuggingFaceTokenizer:
         """Incrementally detokenize the input indexes.
 
         Args:
-            all_input_ids (List[int]): a list of token ids. Expected to be
+            all_input_ids (list[int]): a list of token ids. Expected to be
                 different sections of a long sequence.
             state (DetokenizeState): an instance of DetokenizeState. Consists
                 of incrementally decoding states.
@@ -489,7 +489,7 @@ class Tokenizer:
         """De-tokenize.
 
         Args:
-            t (List[int]): a list of token ids
+            t (list[int]): a list of token ids
             offset (int): for incrementally decoding. Default to None, which
                 means not applied.
             skip_special_tokens (bool): Whether or not to remove special
@@ -507,7 +507,7 @@ class Tokenizer:
         """Incrementally detokenize the input indexes.
 
         Args:
-            all_input_ids (List[int]): a list of token ids. Expected to be
+            all_input_ids (list[int]): a list of token ids. Expected to be
                 different sections of a long sequence.
             state (DetokenizeState): an instance of DetokenizeState. Consists
                 of incrementally decoding states.

@@ -613,7 +613,7 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
       or
       ``{"type": "regex_schema", "regex_schema": "call me [A-Za-z]{1,10}"}``
     - **logit_bias** (dict): Bias to logits. Only supported in pytorch engine.
-    - **tools** (List): A list of tools the model may call. Currently, only
+    - **tools** (list): A list of tools the model may call. Currently, only
       internlm2 functions are supported as a tool. Use this to specify a
       list of functions for which the model can generate JSON inputs.
     - **tool_choice** (str | object): Controls which (if any) tool is called by

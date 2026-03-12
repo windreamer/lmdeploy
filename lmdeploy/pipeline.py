@@ -82,7 +82,7 @@ class Pipeline:
 
     def infer(self,
               prompts: List[str] | str | List[Dict] | List[List[Dict]] | Tuple | List[Tuple],
-              gen_config: GenerationConfig | List[GenerationConfig] | None = None,
+              gen_config: GenerationConfig | list[GenerationConfig] | None = None,
               do_preprocess: bool = True,
               adapter_name: str | None = None,
               use_tqdm: bool = False,
@@ -92,7 +92,7 @@ class Pipeline:
         Args:
             prompts: Prompts to inference. It can be a single prompt, a list of prompts, a list of tuples, or a tuple.
                 Tuple can be (prompt, image or [images]) or (image or [images], prompt).
-            gen_config(GenerationConfig | List[GenerationConfig] | None): Generation configuration(s).
+            gen_config(GenerationConfig | list[GenerationConfig] | None): Generation configuration(s).
             do_preprocess(bool): Whether to pre-process messages.
             adapter_name(str | None): Adapter name.
             use_tqdm(bool): Whether to use progress bar.
@@ -128,7 +128,7 @@ class Pipeline:
     def stream_infer(self,
                      prompts: List[str] | str | List[Dict] | List[List[Dict]] | Tuple | List[Tuple],
                      sessions: 'Session' | List['Session'] | None = None,
-                     gen_config: GenerationConfig | List[GenerationConfig] | None = None,
+                     gen_config: GenerationConfig | list[GenerationConfig] | None = None,
                      do_preprocess: bool = True,
                      adapter_name: str | None = None,
                      stream_response: bool = True,
@@ -136,11 +136,11 @@ class Pipeline:
         """Stream inference.
 
         Args:
-            prompts(List[str] | str | List[Dict] | List[List[Dict]] | Tuple | List[Tuple]): Prompts to inference.
+            prompts(list[str] | str | list[dict] | list[list[dict]] | tuple | list[tuple]): Prompts to inference.
                 It can be a single prompt, a list of prompts, a list of tuples, or a tuple.
                 Tuple can be (prompt, image or [images]) or (image or [images], prompt).
-            sessions(Session | List[Session] | None): Sessions. Each of which corresponds to a prompt.
-            gen_config(GenerationConfig | List[GenerationConfig] | None): Generation configuration(s).
+            sessions(Session | list[Session] | None): Sessions. Each of which corresponds to a prompt.
+            gen_config(GenerationConfig | list[GenerationConfig] | None): Generation configuration(s).
             do_preprocess(bool): Whether to pre-process messages.
             adapter_name(str | None): Adapter name.
             stream_response(bool): Whether to stream the response. If True, the generator will stream the response.
@@ -235,7 +235,7 @@ class Pipeline:
         """Get reward score.
 
         Args:
-            input_ids(List): a list of token_id or a list of token_id list or token_id tensor
+            input_ids(list): a list of token_id or a list of token_id list or token_id tensor
         Return:
             reward score in a list. If the input_ids is a list of token_id, the return value
             is still a list with length 1.
@@ -258,10 +258,10 @@ class Pipeline:
         of the same length.
 
         Args:
-            input_ids (List[int] | List[List[int]]): the batch of input token ids
+            input_ids (list[int] | list[list[int]]): the batch of input token ids
 
         Returns:
-            List[float]: A list of perplexity scores.
+            list[float]: A list of perplexity scores.
         """
         assert isinstance(input_ids, List)
         if isinstance(input_ids[0], int):
@@ -305,7 +305,7 @@ class Pipeline:
 
     def __call__(self,
                  prompts: List[str] | str | List[Dict] | List[List[Dict]],
-                 gen_config: GenerationConfig | List[GenerationConfig] | None = None,
+                 gen_config: GenerationConfig | list[GenerationConfig] | None = None,
                  **kwargs):
         return self.infer(prompts, gen_config=gen_config, **kwargs)
 
@@ -333,7 +333,7 @@ class Pipeline:
     def _request_generator(self,
                            prompts: List[str] | str | List[Dict] | List[List[Dict]],
                            sessions: List['Session'] | 'Session' | None = None,
-                           gen_config: GenerationConfig | List[GenerationConfig] | None = None,
+                           gen_config: GenerationConfig | list[GenerationConfig] | None = None,
                            **kwargs):
         """Generate requests."""
         is_single = self._is_single(prompts)
