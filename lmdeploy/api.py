@@ -66,7 +66,6 @@ def pipeline(model_path: str,
             im = load_image('https://raw.githubusercontent.com/open-mmlab/mmdeploy/main/demo/resources/human-pose.jpg')
             response = pipe([('describe this image', [im])])
             print(response)
-
     """  # noqa E501
 
     return Pipeline(model_path,
