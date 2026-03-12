@@ -113,8 +113,9 @@ def client(api_server_url: str = 'http://0.0.0.0:23333', api_key: str | None = N
         api_key: api key. Default to None, which means no
             api key will be used.
 
-    Returns:
-        Chatbot for LLaMA series models with turbomind as inference engine.
+    Raises:
+        NotImplementedError: This function has been deprecated and removed.
+            Use ``from lmdeploy.serve import APIClient`` instead.
     """
     raise NotImplementedError("The 'client' function is no longer available. This function has been deprecated. "
                               ' Please use "from lmdeploy.serve import APIClient" instead.')
