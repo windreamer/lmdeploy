@@ -19,7 +19,8 @@ def pipeline(model_path: str,
              max_log_len: int | None = None,
              speculative_config: SpeculativeConfig | None = None,
              **kwargs):
-    """
+    """Create a pipeline for inference.
+
     Args:
         model_path: the path of a model. It could be one of the following options:
 
@@ -34,14 +35,17 @@ def pipeline(model_path: str,
               on huggingface.co, such as ``internlm/internlm-chat-7b``,
               ``Qwen/Qwen-7B-Chat``, ``baichuan-inc/Baichuan2-7B-Chat``
               and so on.
-        backend_config: backend
-            config instance. Default to None.
-        chat_template_config: chat template configuration.
-            Default to None.
+        backend_config: backend config instance. Default to None.
+        chat_template_config: chat template configuration. Default to None.
         log_level: set log level whose value among [``CRITICAL``, ``ERROR``,
             ``WARNING``, ``INFO``, ``DEBUG``]
         max_log_len: Max number of prompt characters or prompt tokens
-            being printed in log
+            being printed in log.
+        speculative_config: speculative decoding configuration.
+        **kwargs: additional keyword arguments passed to the pipeline.
+
+    Returns:
+        Pipeline: a pipeline instance for inference.
 
     Examples:
 
@@ -63,7 +67,7 @@ def pipeline(model_path: str,
             response = pipe([('describe this image', [im])])
             print(response)
 
-    """ # noqa E501
+    """  # noqa E501
 
     return Pipeline(model_path,
                     backend_config=backend_config,
@@ -106,10 +110,11 @@ def client(api_server_url: str = 'http://0.0.0.0:23333', api_key: str | None = N
 
     Args:
         api_server_url: communicating address ``http://<ip>:<port>`` of
-            api_server
+            api_server.
         api_key: api key. Default to None, which means no
             api key will be used.
-    Return:
+
+    Returns:
         Chatbot for LLaMA series models with turbomind as inference engine.
     """
     raise NotImplementedError("The 'client' function is no longer available. This function has been deprecated. "
