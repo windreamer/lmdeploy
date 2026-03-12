@@ -14,7 +14,7 @@ from lmdeploy.utils import get_logger
 
 @dataclass
 class DetokenizeState:
-    """A state collection of incrementally detokenization.
+    """A state collection for incremental detokenization.
 
     Args:
         ids_offset: offset to all input ids. In LMDeploy, the output
