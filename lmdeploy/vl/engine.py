@@ -64,7 +64,7 @@ class ImageEncoder:
         """Get multimodal embedding.
 
         Args:
-            messages (List[Dict]): a list of message, which is the output
+            messages (list[dict]): a list of message, which is the output
             of `preprocess()`
         """
         future = asyncio.get_event_loop().run_in_executor(self.executor, self.model.forward, messages,
@@ -84,12 +84,12 @@ class ImageEncoder:
     ) -> List[Dict]:
         """
         Args:
-            messages (List[Dict]): a list of message, which is supposed to be
+            messages (list[dict]): a list of message, which is supposed to be
                 the output of `preprocess`
         Returns:
             a dict which will be passed to pytorch engine_instance's forward.
             The dict is like the following:
-            Dict(
+            dict(
                 'prompt': 'the prompt after applying chat template'
                 'input_ids': [],
                 'multimodal': {
@@ -125,12 +125,12 @@ class ImageEncoder:
     ) -> Dict:
         """
         Args:
-            messages (List[Dict]): a list of message, which is supposed to be
+            messages (list[dict]): a list of message, which is supposed to be
                 the output of `async_infer`
         Returns:
             a dict which will be passed to pytorch engine_instance's forward.
             The dict is like the following:
-            Dict(
+            dict(
                 'prompt': 'the prompt after applying chat template'
                 'input_ids': [],
                 'input_embeddings': list[torch.Tensor],
