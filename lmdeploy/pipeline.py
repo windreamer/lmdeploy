@@ -93,7 +93,7 @@ class Pipeline:
         """Inference prompts.
 
         Args:
-            prompts: Prompts to inference. It can be a single prompt, a list of prompts, a list of tuples, or a tuple.
+            prompts: Prompts for inference. It can be a single prompt, a list of prompts, a list of tuples, or a tuple.
                 tuple can be (prompt, image or [images]) or (image or [images], prompt).
             gen_config: Generation configuration(s).
             do_preprocess: Whether to pre-process messages.
