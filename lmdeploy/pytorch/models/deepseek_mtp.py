@@ -1,16 +1,29 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, RMSNorm, RopeType, SiluAndMul, build_rotary_embedding,
-                                 build_rotary_params)
-from lmdeploy.pytorch.nn.linear import (build_colwise_linear, build_down_linear, build_gateup_linear, build_o_proj,
-                                        build_rowwise_linear)
+from lmdeploy.pytorch.nn import (
+    ApplyRotaryEmb,
+    Attention,
+    RMSNorm,
+    RopeType,
+    SiluAndMul,
+    build_rotary_embedding,
+    build_rotary_params,
+)
+from lmdeploy.pytorch.nn.linear import (
+    build_colwise_linear,
+    build_down_linear,
+    build_gateup_linear,
+    build_o_proj,
+    build_rowwise_linear,
+)
 from lmdeploy.pytorch.nn.moe import build_fused_moe
 from lmdeploy.pytorch.nn.rotary_embedding import get_rope_parameters, get_rope_theta
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
@@ -161,8 +174,8 @@ class DeepseekV2Attention(DeepseekV2Attention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        rotary_pos_emb: Tuple[torch.FloatTensor, torch.FloatTensor],
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        rotary_pos_emb: tuple[torch.FloatTensor, torch.FloatTensor],
+        past_key_value: tuple[torch.Tensor] | None = None,
         attn_metadata: Any = None,
     ):
         """Rewrite of LlamaAttention.forward."""
@@ -353,13 +366,31 @@ class SharedHead(nn.Module):
         return self.norm(hidden_states)
 
 
+def build_deepseek_rotary_embedding(config: PretrainedConfig):
+    """Build deepseek rotary embedding."""
+    emb_type = RopeType.LinearScaling
+    rope_dim = config.qk_rope_head_dim if getattr(config, 'use_mla', True) else (config.hidden_size //
+                                                                                 config.num_attention_heads)
+    rope_max_pos_emb = config.max_position_embeddings
+    rope_base = get_rope_theta(config)
+
+    rope_params = dict(emb_type=emb_type, dim=rope_dim, max_position_embeddings=rope_max_pos_emb, base=rope_base)
+    update_params = build_rotary_params(config)
+    rope_params.update(update_params)
+    return build_rotary_embedding(**rope_params)
+
+
 class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 layer_idx: int,
-                 dtype: torch.dtype = None,
-                 device: torch.device = None) -> None:
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        layer_idx: int,
+        dtype: torch.dtype = None,
+        device: torch.device = None,
+        decoder_layer_cls=DeepseekV2DecoderLayer,
+        build_rotary_embedding_func=build_deepseek_rotary_embedding,
+    ) -> None:
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -386,26 +417,17 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         self.shared_head = SharedHead(config=config, dtype=dtype, device=device)
 
-        self.mtp_block = DeepseekV2DecoderLayer(config, layer_idx=layer_idx, dtype=dtype, device=device)
+        self.mtp_block = decoder_layer_cls(config, layer_idx=layer_idx, dtype=dtype, device=device)
 
-        emb_type = RopeType.LinearScaling
-        rope_dim = config.qk_rope_head_dim if getattr(config, 'use_mla', True) else (config.hidden_size //
-                                                                                     config.num_attention_heads)
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = get_rope_theta(config)
-
-        rope_params = dict(emb_type=emb_type, dim=rope_dim, max_position_embeddings=rope_max_pos_emb, base=rope_base)
-        update_params = build_rotary_params(config)
-        rope_params.update(update_params)
-        self.rotary_emb = build_rotary_embedding(**rope_params)
+        self.rotary_emb = build_rotary_embedding_func(config)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        past_key_value: List[List[torch.Tensor]],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        past_key_value: list[list[torch.Tensor]],
+        inputs_embeds: torch.Tensor | None = None,
         attn_metadata: Any = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
@@ -437,7 +459,14 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
 class DeepSeekMultiTokenPredictor(nn.Module):
 
-    def __init__(self, config: PretrainedConfig, dtype: torch.dtype = None, device: torch.device = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        dtype: torch.dtype = None,
+        device: torch.device = None,
+        decoder_layer_cls=DeepseekV2DecoderLayer,
+        build_rotary_embedding_func=build_deepseek_rotary_embedding,
+    ):
         super().__init__()
         self.config = config
         self.mtp_start_layer_idx = config.num_hidden_layers
@@ -450,6 +479,8 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                 idx,
                 dtype=dtype,
                 device=device,
+                decoder_layer_cls=decoder_layer_cls,
+                build_rotary_embedding_func=build_rotary_embedding_func,
             )
             for idx in range(self.mtp_start_layer_idx, self.mtp_start_layer_idx + self.num_mtp_layers)
         })
@@ -459,8 +490,8 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        past_key_values: List[List[torch.Tensor]],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        past_key_values: list[list[torch.Tensor]],
+        inputs_embeds: torch.Tensor | None = None,
         attn_metadata: Any = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
@@ -492,17 +523,25 @@ class DeepSeekMultiTokenPredictor(nn.Module):
 
 class DeepseekMTPModel(nn.Module, CudaGraphMixin):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 ctx_mgr: StepContextManager,
-                 dtype: torch.dtype = None,
-                 device: torch.device = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        ctx_mgr: StepContextManager,
+        dtype: torch.dtype = None,
+        device: torch.device = None,
+        decoder_layer_cls=DeepseekV2DecoderLayer,
+        build_rotary_embedding_func=build_deepseek_rotary_embedding,
+    ):
         super().__init__()
         self.config = config
         self.quantization_config = getattr(config, 'quantization_config', None)
         self.dtype = dtype
         self.ctx_mgr = ctx_mgr
-        self.model = DeepSeekMultiTokenPredictor(config, dtype=dtype, device=device)
+        self.model = DeepSeekMultiTokenPredictor(config,
+                                                 dtype=dtype,
+                                                 device=device,
+                                                 decoder_layer_cls=decoder_layer_cls,
+                                                 build_rotary_embedding_func=build_rotary_embedding_func)
 
         self._load_buffers = dict()
 
@@ -515,9 +554,9 @@ class DeepseekMTPModel(nn.Module, CudaGraphMixin):
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         target_hidden_states: torch.Tensor,
-        past_key_values: List[List[torch.Tensor]],
+        past_key_values: list[list[torch.Tensor]],
         attn_metadata: Any = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids,
@@ -556,8 +595,8 @@ class DeepseekMTPModel(nn.Module, CudaGraphMixin):
 
     def prepare_inputs_for_generation(
         self,
-        past_key_values: List[List[torch.Tensor]],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        past_key_values: list[list[torch.Tensor]],
+        inputs_embeds: torch.Tensor | None = None,
         context: StepContext = None,
     ):
         """Prepare input."""
@@ -574,8 +613,8 @@ class DeepseekMTPModel(nn.Module, CudaGraphMixin):
             target_hidden_states=target_hidden_states,
         )
 
-    def _load_weight_experts(self, name: str, loaded_weight: torch.Tensor, params_dict: Dict[str, nn.Parameter],
-                             expert_params_mapping: List):
+    def _load_weight_experts(self, name: str, loaded_weight: torch.Tensor, params_dict: dict[str, nn.Parameter],
+                             expert_params_mapping: list):
         """Load weight experts."""
         for (param_name, weight_name, expert_id, shard_id) in expert_params_mapping:
             if weight_name not in name:
@@ -588,8 +627,8 @@ class DeepseekMTPModel(nn.Module, CudaGraphMixin):
             param = params_dict[name]
             load_weight(param, loaded_weight)
 
-    def _load_weight_attention(self, name: str, loaded_weight: torch.Tensor, params_dict: Dict[str, nn.Parameter],
-                               update_pe_mapping: List):
+    def _load_weight_attention(self, name: str, loaded_weight: torch.Tensor, params_dict: dict[str, nn.Parameter],
+                               update_pe_mapping: list):
         """Load weight attention."""
         device = next(iter(params_dict.values())).device
 
@@ -681,7 +720,7 @@ class DeepseekMTPModel(nn.Module, CudaGraphMixin):
                 param = params_dict[name]
                 load_weight(param, loaded_weight)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load weights."""
 
         def __skip_nextn(name, nextn_keys):

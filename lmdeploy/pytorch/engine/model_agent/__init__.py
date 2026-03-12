@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Dict
 
 from lmdeploy.pytorch.config import BackendConfig, CacheConfig, MiscConfig, ModelConfig, SpecDecodeConfig
 from lmdeploy.pytorch.devices import DeviceContext, get_device_manager
@@ -16,7 +15,7 @@ def build_model_agent(
     misc_config: MiscConfig,
     dist_ctx: DistContext = None,
     device_ctx: DeviceContext = None,
-    adapters: Dict[str, str] = None,
+    adapters: dict[str, str] = None,
     specdecode_config: SpecDecodeConfig = None,
 ):
     """Create model agent.

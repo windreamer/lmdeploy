@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Dict, List, Literal, Tuple
+from typing import Literal
 
 from transformers import AutoConfig
 
@@ -43,7 +43,7 @@ def autoget_backend(model_path: str) -> Literal['turbomind', 'pytorch']:
     if is_turbomind_installed:
         if not turbomind_has:
             logger.warning('Fallback to pytorch engine because '
-                           f'`{model_path}` not supported by turbomind'
+                           f'{model_path!r} not supported by turbomind'
                            ' engine.')
     else:
         logger.warning('Fallback to pytorch engine because turbomind engine is not '
@@ -58,7 +58,7 @@ def autoget_backend(model_path: str) -> Literal['turbomind', 'pytorch']:
 def autoget_backend_config(
     model_path: str,
     backend_config: PytorchEngineConfig | TurbomindEngineConfig | None = None
-) -> Tuple[Literal['turbomind', 'pytorch'], PytorchEngineConfig | TurbomindEngineConfig]:
+) -> tuple[Literal['turbomind', 'pytorch'], PytorchEngineConfig | TurbomindEngineConfig]:
     """Get backend config automatically.
 
     Args:
@@ -78,7 +78,7 @@ def autoget_backend_config(
     backend = autoget_backend(model_path)
     config = PytorchEngineConfig() if backend == 'pytorch' else TurbomindEngineConfig()
     if backend_config is not None:
-        if type(backend_config) == type(config):
+        if type(backend_config) is type(config):
             config = backend_config
         else:
             data = asdict(backend_config)
@@ -121,6 +121,8 @@ def check_vl_llm(config: dict) -> bool:
         return True
     elif arch in ['ChatGLMModel', 'ChatGLMForConditionalGeneration'] and 'vision_config' in config:
         return True
+    elif arch in ['Qwen3_5ForConditionalGeneration', 'Qwen3_5MoeForConditionalGeneration']:
+        return False
     elif arch in supported_archs:
         return True
     return False
@@ -174,15 +176,15 @@ def get_model_arch(model_path: str):
 def search_nested_config(config, key):
     """Recursively searches for the value associated with the given key in a
     nested configuration of a model."""
-    if isinstance(config, Dict):
+    if isinstance(config, dict):
         for k, v in config.items():
             if k == key:
                 return v
-            if isinstance(v, (Dict, List)):
+            if isinstance(v, (dict, list)):
                 result = search_nested_config(v, key)
                 if result is not None:
                     return result
-    elif isinstance(config, List):
+    elif isinstance(config, list):
         for item in config:
             result = search_nested_config(item, key)
             if result is not None:

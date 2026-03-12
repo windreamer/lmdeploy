@@ -6,10 +6,11 @@ import json
 import os
 import re
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncGenerator, Literal
+from typing import Literal
 
 import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
@@ -21,26 +22,58 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Mount
 
 from lmdeploy.archs import get_task
-from lmdeploy.messages import (GenerationConfig, LogitsProcessor, PytorchEngineConfig, SpeculativeConfig,
-                               TurbomindEngineConfig)
+from lmdeploy.messages import (
+    GenerationConfig,
+    LogitsProcessor,
+    PytorchEngineConfig,
+    SpeculativeConfig,
+    TurbomindEngineConfig,
+)
 from lmdeploy.metrics.metrics_processor import metrics_processor
 from lmdeploy.model import ChatTemplateConfig
 from lmdeploy.pytorch.disagg.config import DistServeEngineConfig
-from lmdeploy.pytorch.disagg.conn.protocol import (DistServeCacheFreeRequest, DistServeConnectionRequest,
-                                                   DistServeDropConnectionRequest, DistServeInitRequest,
-                                                   MigrationRequest)
+from lmdeploy.pytorch.disagg.conn.protocol import (
+    DistServeCacheFreeRequest,
+    DistServeConnectionRequest,
+    DistServeDropConnectionRequest,
+    DistServeInitRequest,
+    MigrationRequest,
+)
 from lmdeploy.serve.core import AsyncEngine
 from lmdeploy.serve.openai.harmony_utils import GptOssChatParser
-from lmdeploy.serve.openai.protocol import ChatCompletionResponse  # noqa: E501
-from lmdeploy.serve.openai.protocol import (AbortRequest, ChatCompletionRequest, ChatCompletionResponseChoice,
-                                            ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse,
-                                            ChatCompletionTokenLogprob, ChatMessage, ChoiceLogprobs, CompletionRequest,
-                                            CompletionResponse, CompletionResponseChoice,
-                                            CompletionResponseStreamChoice, CompletionStreamResponse, DeltaMessage,
-                                            EmbeddingsRequest, EncodeRequest, EncodeResponse, ErrorResponse,
-                                            GenerateReqInput, GenerateReqMetaOutput, GenerateReqOutput, LogProbs,
-                                            ModelCard, ModelList, ModelPermission, PoolingRequest, PoolingResponse,
-                                            TopLogprob, UpdateParamsRequest, UsageInfo)
+from lmdeploy.serve.openai.protocol import (
+    AbortRequest,
+    ChatCompletionRequest,
+    ChatCompletionResponse,  # noqa: E501
+    ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
+    ChatCompletionTokenLogprob,
+    ChatMessage,
+    ChoiceLogprobs,
+    CompletionRequest,
+    CompletionResponse,
+    CompletionResponseChoice,
+    CompletionResponseStreamChoice,
+    CompletionStreamResponse,
+    DeltaMessage,
+    EmbeddingsRequest,
+    EncodeRequest,
+    EncodeResponse,
+    ErrorResponse,
+    GenerateReqInput,
+    GenerateReqMetaOutput,
+    GenerateReqOutput,
+    LogProbs,
+    ModelCard,
+    ModelList,
+    ModelPermission,
+    PoolingRequest,
+    PoolingResponse,
+    TopLogprob,
+    UpdateParamsRequest,
+    UsageInfo,
+)
 from lmdeploy.serve.openai.reasoning_parser.reasoning_parser import ReasoningParser, ReasoningParserManager
 from lmdeploy.serve.openai.tool_parser.tool_parser import ToolParser, ToolParserManager
 from lmdeploy.serve.utils.server_utils import validate_json_request
@@ -962,6 +995,8 @@ async def generate(request: GenerateReqInput, raw_request: Request = None):
         spaces_between_special_tokens=request.spaces_between_special_tokens,
         include_stop_str_in_output=request.include_stop_str_in_output,
         return_routed_experts=request.return_routed_experts,
+        repetition_ngram_size=request.repetition_ngram_size,
+        repetition_ngram_threshold=request.repetition_ngram_threshold,
     )
 
     result_generator = VariableInterface.async_engine.generate(

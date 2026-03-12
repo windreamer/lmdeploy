@@ -1,12 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Callable, List
+from collections.abc import Callable
 
 import torch
 
-from lmdeploy.pytorch.kernels.dlinfer import DlinferMoECommType  # noqa: F401
-from lmdeploy.pytorch.kernels.dlinfer import DlinferMoeMetadata  # noqa: F401
-from lmdeploy.pytorch.kernels.dlinfer import fused_moe, moe_gating_topk_softmax
+from lmdeploy.pytorch.kernels.dlinfer import (
+    DlinferMoECommType,  # noqa: F401
+    DlinferMoeMetadata,  # noqa: F401
+    fused_moe,
+    moe_gating_topk_softmax,
+)
 from lmdeploy.pytorch.model_inputs import get_step_ctx_manager
 
 from ..moe import FusedMoEBuilder, FusedMoEImpl, SoftmaxTopKBuilder, SoftmaxTopKImpl
@@ -18,12 +21,13 @@ class DlinferSoftmaxTopKImpl(SoftmaxTopKImpl):
     def __init__(self, top_k: int, dim: int = -1, n_groups: int = -1):
         self.top_k = top_k
         self.dim = dim
-        if n_groups != -1:
-            raise NotImplementedError('Group router not supported')
+        self.n_groups = n_groups
 
     def forward(self, x: torch.Tensor):
         step_context = get_step_ctx_manager().current_context()
         moe_metadata = getattr(step_context, 'moe_metadata', None)
+        if moe_metadata is not None:
+            moe_metadata.router_n_groups = self.n_groups
         routing_weights, selected_experts = moe_gating_topk_softmax(x, self.top_k, moe_metadata)
         return routing_weights, selected_experts
 
@@ -84,7 +88,7 @@ class DlinferFusedMoEImpl(FusedMoEImpl):
                 down_weights: torch.Tensor,
                 gate_up_bias: torch.Tensor = None,
                 down_bias: torch.Tensor = None,
-                expert_list: List[int] = None,
+                expert_list: list[int] = None,
                 act_func: Callable = None):
         """forward."""
         assert gate_up_bias is None
