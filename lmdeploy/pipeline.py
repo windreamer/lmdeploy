@@ -94,7 +94,7 @@ class Pipeline:
 
         Args:
             prompts: Prompts to inference. It can be a single prompt, a list of prompts, a list of tuples, or a tuple.
-                Tuple can be (prompt, image or [images]) or (image or [images], prompt).
+                tuple can be (prompt, image or [images]) or (image or [images], prompt).
             gen_config: Generation configuration(s).
             do_preprocess: Whether to pre-process messages.
             adapter_name: Adapter name.
@@ -143,7 +143,7 @@ class Pipeline:
 
         Args:
             prompts: Prompts to inference. It can be a single prompt, a list of prompts, a list of tuples, or a tuple.
-                Tuple can be (prompt, image or [images]) or (image or [images], prompt).
+                tuple can be (prompt, image or [images]) or (image or [images], prompt).
             sessions: Sessions. Each of which corresponds to a prompt.
             gen_config: Generation configuration(s).
             do_preprocess: Whether to pre-process messages.

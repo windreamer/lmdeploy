@@ -51,10 +51,10 @@ class GenerationConfig:
         random_seed: Seed used when sampling a token
         stop_words: Words that stop generating further tokens
         bad_words: Words that the engine will never generate
-        stop_token_ids: List of tokens that stop the generation
+        stop_token_ids: list of tokens that stop the generation
             when they are generated. The returned output will not contain
             the stop tokens.
-        bad_token_ids: List of tokens that the engine will never
+        bad_token_ids: list of tokens that the engine will never
             generate.
         min_new_tokens: The minimum numbers of tokens to generate,
             ignoring the number of tokens in the prompt.
@@ -602,7 +602,7 @@ class RequestMetrics:
 
     Attributes:
         token_timestamp: A wall-clock time when a token is generated.
-        engine_events: List of engine events during inference.
+        engine_events: list of engine events during inference.
     """
     token_timestamp: float = 0.0
     engine_events: list[EngineEvent] = field(default_factory=list)

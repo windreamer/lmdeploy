@@ -172,7 +172,7 @@ class BaseChatTemplate:
         chat template.
 
         Args:
-            messages (str | List): user's input prompt
+            messages (str | list): user's input prompt
         Returns:
             str: the concatenated prompt
         """
@@ -803,7 +803,7 @@ def get_chat_template(model_path: str, config: ChatTemplateConfig | None = None)
 
     Args:
         model_path (str): the model path.
-        config (Optional[ChatTemplateConfig]): the chat template config.
+        config (ChatTemplateConfig | None): the chat template config.
     Returns:
         BaseChatTemplate: the chat template.
     """
