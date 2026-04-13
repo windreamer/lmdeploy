@@ -118,6 +118,7 @@ class SubCliServe:
         max_prefill_token_num_act = ArgumentHelper.max_prefill_token_num(pt_group)
         quant_policy = ArgumentHelper.quant_policy(pt_group)
         model_format = ArgumentHelper.model_format(pt_group)
+        ArgumentHelper.ignore_layers(pt_group)
         hf_overrides = ArgumentHelper.hf_overrides(pt_group)
         disable_metrics = ArgumentHelper.disable_metrics(pt_group)
         dp = ArgumentHelper.dp(pt_group)
@@ -239,6 +240,7 @@ class SubCliServe:
                 role=EngineRole[args.role],
                 migration_backend=MigrationBackend[args.migration_backend],
                 model_format=args.model_format,
+                ignore_layers=args.ignore_layers,
                 hf_overrides=args.hf_overrides,
                 disable_vision_encoder=args.disable_vision_encoder,
                 logprobs_mode=args.logprobs_mode,

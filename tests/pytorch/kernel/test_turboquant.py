@@ -45,7 +45,7 @@ class TestTurboQuantMSE:
     def n_vectors(self):
         yield 100
 
-    @pytest.mark.parametrize('nbits', [2])
+    @pytest.mark.parametrize('nbits', [2, 4])
     def test_quant_dequant_roundtrip(self, head_dim, n_vectors, nbits):
         """Test quantization-dequantization roundtrip."""
         torch.manual_seed(42)
@@ -66,7 +66,7 @@ class TestTurboQuantMSE:
 
         print(f'  bits={nbits}: quant OK, norms range=[{norms.min():.3f}, {norms.max():.3f}]')
 
-    @pytest.mark.parametrize('nbits', [2])
+    @pytest.mark.parametrize('nbits', [2, 4])
     def test_mse_within_theoretical_bound(self, head_dim, n_vectors, nbits):
         """Verify quantization-dequantization MSE is within theoretical bound
         (for unit vectors)."""
@@ -94,7 +94,7 @@ class TestTurboQuantMSE:
         # Theoretical bound is an upper bound, actual MSE must be less
         assert ratio < 1, f'MSE {mse} exceeds theoretical bound {theoretical_bound} (ratio={ratio:.3f})'
 
-    @pytest.mark.parametrize('nbits', [2])
+    @pytest.mark.parametrize('nbits', [2, 4])
     def test_reconstruction_quality(self, head_dim, n_vectors, nbits):
         """Verify reconstruction quality (using cosine similarity for unit
         vectors).
@@ -120,8 +120,9 @@ class TestTurboQuantMSE:
         print(f'  bits={nbits}: cos_sim={cos_sim:.4f}')
 
         # Cosine similarity should be close to 1.0
-        # 2bit: ~0.80
-        assert cos_sim > 0.79, f'2bit cosine similarity {cos_sim} too low'
+        # 2bit: ~0.80, 4bit: ~0.995
+        min_cos_sim = 0.79 if nbits == 2 else 0.99
+        assert cos_sim > min_cos_sim, f'{nbits}bit cosine similarity {cos_sim} too low'
 
     def test_determinism(self, head_dim):
         """Verify same input produces same output."""

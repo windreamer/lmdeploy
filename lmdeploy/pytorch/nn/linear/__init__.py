@@ -12,6 +12,7 @@ from .awq import AwqLinear, MergedAwqLinear, QKVAwqLinear
 from .blocked_fp8 import BlockedF8Linear, MergedBlockedF8Linear, QKVBlockedF8Linear
 from .default import BaseLinear, MergedBaseLinear, QKVBaseLinear
 from .lora import LoRA  # noqa: F401
+from .turboquant import TurboQuantLinear
 from .w8a8 import MergedW8A8Linear, QKVW8A8Linear, W8A8Linear
 
 
@@ -94,6 +95,20 @@ def build_linear(
             is_tp=is_tp,
             all_reduce=all_reduce,
             dp_gather=dp_gather,
+            layer_type=layer_type,
+        )
+    elif quant_method == 'turboquant':
+        return TurboQuantLinear(
+            in_features,
+            out_features,
+            bias=bias,
+            dtype=dtype,
+            device=device,
+            colwise=colwise,
+            is_tp=is_tp,
+            all_reduce=all_reduce,
+            bit_width=quant_config.bits,
+            group_size=quant_config.group_size,
             layer_type=layer_type,
         )
     else:
@@ -251,6 +266,27 @@ def build_merged_colwise_linear(
             dp_gather=dp_gather,
             layer_type=layer_type,
         )
+    elif quant_method == 'turboquant':
+        # TurboQuant doesn't have merged linear, use separate linear layers
+        from .turboquant import MergedTurboQuantLinear, TurboQuantLinear
+        layers = []
+        for out_feat in all_out_features:
+            layers.append(
+                TurboQuantLinear(
+                    in_features=in_features,
+                    out_features=out_feat,
+                    bias=bias,
+                    dtype=dtype,
+                    device=device,
+                    colwise=True,
+                    is_tp=is_tp,
+                    all_reduce=False,
+                    bit_width=quant_config.bits,
+                    group_size=quant_config.group_size,
+                    layer_type=layer_type,
+                )
+            )
+        return MergedTurboQuantLinear(layers=layers, out_names=out_names)
     else:
         raise RuntimeError(f'Unsupported quant method: {quant_method}')
 
@@ -327,6 +363,68 @@ def build_qkv_proj(in_features: int,
                                   is_tp=is_tp,
                                   dp_gather=False,
                                   num_replicate_kv_heads=num_replicate_kv_heads)
+    if quant_method == 'turboquant':
+        # TurboQuant doesn't have a packed QKV, so use separate Q, K, V projections
+        from .turboquant import TurboQuantLinear
+        q_out = num_q_heads * head_size
+        kv_out = num_kv_heads * head_size_v
+
+        # For TP, we need to split the input features
+        dist_config = get_dist_manager().current_config()
+        is_tp = is_tp if dist_config.attn_tp > 1 else False
+
+        q_proj = TurboQuantLinear(
+            in_features=in_features,
+            out_features=q_out,
+            bias=bias,
+            dtype=dtype,
+            device=device,
+            colwise=False,  # rowwise for output
+            is_tp=is_tp,
+            all_reduce=False,
+            bit_width=quant_config.get('bits', 4),
+            group_size=quant_config.get('group_size', 128),
+            layer_type='attn',
+        )
+        k_proj = TurboQuantLinear(
+            in_features=in_features,
+            out_features=kv_out,
+            bias=bias,
+            dtype=dtype,
+            device=device,
+            colwise=False,
+            is_tp=is_tp,
+            all_reduce=False,
+            bit_width=quant_config.get('bits', 4),
+            group_size=quant_config.get('group_size', 128),
+            layer_type='attn',
+        )
+        v_proj = TurboQuantLinear(
+            in_features=in_features,
+            out_features=kv_out,
+            bias=bias,
+            dtype=dtype,
+            device=device,
+            colwise=False,
+            is_tp=is_tp,
+            all_reduce=False,
+            bit_width=quant_config.get('bits', 4),
+            group_size=quant_config.get('group_size', 128),
+            layer_type='attn',
+        )
+        # Return a module that combines Q, K, V projections
+        from .turboquant import TurboQuantQKVLinear
+        return TurboQuantQKVLinear(
+            q_proj,
+            k_proj,
+            v_proj,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            head_size_v=head_size_v,
+            is_tp=is_tp,
+            all_reduce=False,
+        )
     else:
         raise RuntimeError(f'Unsupported quant method: {quant_method}')
 

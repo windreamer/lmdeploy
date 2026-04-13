@@ -274,7 +274,7 @@ def _default_check_env(device: str):
     pass
 
 
-def _patch_quantization_config(hf_config: Any, model_format: str = None):
+def _patch_quantization_config(hf_config: Any, model_format: str = None, ignore_layers: list[str] = None):
     """Patch quantization config."""
     if model_format is None:
         return hf_config
@@ -290,14 +290,23 @@ def _patch_quantization_config(hf_config: Any, model_format: str = None):
         logger.debug('Patch quantization config for fp8.')
         from lmdeploy.pytorch.envs import scale_fmt
         quantization_config = dict(quant_method='fp8', fmt='e4m3', weight_block_size=[128, 128], scale_fmt=scale_fmt)
+    elif model_format == 'turboquant':
+        # Use user-provided ignore_layers, or default to [] if None
+        ignored_layers = ignore_layers if ignore_layers is not None else []
+        quantization_config = dict(
+            quant_method='turboquant',
+            bits=4,
+            group_size=128,
+            ignored_layers=ignored_layers,
+        )
     else:
         raise RuntimeError(f'Unsupported weight quantization method: {model_format}')
 
     hf_config.quantization_config = quantization_config
     # for vlm models
-    if hasattr(hf_config, 'text_config'):
+    if hasattr(hf_config, 'text_config') and hf_config.text_config is not None:
         hf_config.text_config.quantization_config = quantization_config
-    elif hasattr(hf_config, 'llm_config'):
+    elif hasattr(hf_config, 'llm_config') and hf_config.llm_config is not None:
         hf_config.llm_config.quantization_config = quantization_config
 
     return hf_config
@@ -373,6 +382,7 @@ class ModelConfig:
         spec_method: str = None,
         num_spec_tokens: int = 0,
         model_format: str = None,
+        ignore_layers: list[str] = None,
         device_type: str = 'auto',
         block_size: int = 64,
     ):
@@ -396,7 +406,7 @@ class ModelConfig:
             hf_config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
 
         # update quantization config
-        hf_config = _patch_quantization_config(hf_config, model_format=model_format)
+        hf_config = _patch_quantization_config(hf_config, model_format=model_format, ignore_layers=ignore_layers)
 
         model_config = cls.from_hf_config(
             hf_config,
@@ -516,6 +526,7 @@ class MiscConfig:
     custom_module_map: str = None
     empty_init: bool = False
     model_format: str = None
+    ignore_layers: list[str] = None
     hf_overrides: dict[str, Any] = None
     disable_vision_encoder: bool = False
     logprobs_mode: str = None
@@ -536,6 +547,7 @@ class MiscConfig:
             empty_init=engine_config.empty_init,
             prefill_interval=engine_config.prefill_interval,
             model_format=engine_config.model_format,
+            ignore_layers=engine_config.ignore_layers,
             hf_overrides=engine_config.hf_overrides,
             disable_vision_encoder=engine_config.disable_vision_encoder,
             logprobs_mode=engine_config.logprobs_mode,
@@ -646,6 +658,22 @@ class QuantizationConfig:
                 quant_dtype = 'float8_e5m2'
             else:
                 raise TypeError(f'Unsupported fp8 fmt: {fmt}')
+        elif quant_method == 'turboquant':
+            bits = quant_config.get('bits', 4)
+            group_size = quant_config.get('group_size', 128)
+            if quant_dtype is None:
+                quant_dtype = 'bfloat16'
+            ignored_layers = quant_config.get('ignored_layers', [])
+            if not ignored_layers:
+                ignored_layers = quant_config.get('modules_to_not_convert', [])
+            return cls(
+                quant_method=quant_method,
+                quant_dtype=quant_dtype,
+                bits=bits,
+                group_size=group_size,
+                ignored_layers=ignored_layers,
+                hf_quant_config=quant_config,
+            )
         else:
             raise TypeError(f'Unsupported quant method: {quant_method}')
 
@@ -676,7 +704,7 @@ class QuantizationConfig:
         if not prefix or not self.ignored_layers:
             return self.quant_method
 
-        is_ignore = any([prefix in layer_name for layer_name in self.ignored_layers])
+        is_ignore = any(layer_name in prefix for layer_name in self.ignored_layers)
         quant_method = None if is_ignore else self.quant_method
         return quant_method
 

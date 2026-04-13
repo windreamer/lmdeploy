@@ -152,12 +152,22 @@ class ArgumentHelper:
         return parser.add_argument('--model-format',
                                    type=str,
                                    default=default,
-                                   choices=['hf', 'awq', 'gptq', 'compressed-tensors', 'fp8', 'mxfp4'],
+                                   choices=['hf', 'awq', 'gptq', 'compressed-tensors', 'fp8', 'mxfp4', 'turboquant'],
                                    help='The format of input model. `hf` means `hf_llama`, '
                                    '`awq` and `gptq` refer to 4-bit grouped quantization, '
                                    '`compressed-tensors` refers to pack-quantized grouped int4 checkpoints and is '
                                    'usually auto-detected from the model config, `fp8` refers to blocked fp8 '
-                                   'checkpoints, and `mxfp4` refers to MXFP4 expert weights.')
+                                   'checkpoints, `mxfp4` refers to MXFP4 expert weights, and `turboquant` refers '
+                                   'to turboquant weight-only quantization.')
+
+    @staticmethod
+    def ignore_layers(parser, default: list = None):
+        return parser.add_argument('--ignore-layers',
+                                   type=str,
+                                   nargs='+',
+                                   default=default,
+                                   help='List of layer names to not quantize. Only works when '
+                                   '--model-format is turboquant. Default: [].')
 
     @staticmethod
     def revision(parser, default: str = None):

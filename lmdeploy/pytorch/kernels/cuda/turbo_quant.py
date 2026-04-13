@@ -43,7 +43,8 @@ def hadamard_rotate(x: Tensor) -> Tensor:
     Returns:
         Transformed tensor of same shape, in original dtype.
     """
-    if _USE_FAST_HADAMARD:
+    # Only use fast hadamard if library is installed AND tensor is on CUDA
+    if _USE_FAST_HADAMARD and x.is_cuda:
         d = x.shape[-1]
         scale = 1.0 / math.sqrt(d)
         return _fast_hadamard_transform(x, scale=scale)
@@ -72,7 +73,8 @@ def hadamard_rotate_inv(x: Tensor) -> Tensor:
     Returns:
         Inverse-transformed tensor of same shape, in original dtype.
     """
-    if _USE_FAST_HADAMARD:
+    # Only use fast hadamard if library is installed AND tensor is on CUDA
+    if _USE_FAST_HADAMARD and x.is_cuda:
         # Hadamard is self-inverse (up to scaling)
         d = x.shape[-1]
         scale = 1.0 / math.sqrt(d)
@@ -129,25 +131,26 @@ def get_hadamard_matrix(d: int, device: str = 'cuda', dtype=torch.float32) -> Te
 
 
 def get_lloyd_max_codebook(d: int, bits: int, device: str = 'cuda') -> tuple[Tensor, Tensor]:
-    """Get precomputed Lloyd-Max codebook for 2-bit and 3-bit quantization.
+    """Get precomputed Lloyd-Max codebook for 2-bit, 3-bit, and 4-bit
+    quantization.
 
     The table is baked from the same construction logic as the original
     implementation under sigma=1, then scaled at runtime by sigma=1/sqrt(d).
 
     Supported:
-        bits = 2 (V cache), 3 (K cache with QJL4)
+        bits = 2 (V cache), 3 (K cache with QJL4), 4 (weight quantization)
 
     Args:
-        d: head dimension.
-        bits: quantization bits (2 or 3).
+        d: head dimension (used for sigma scaling).
+        bits: quantization bits (2, 3, or 4).
         device: target device.
 
     Returns:
         Tuple of (centroids, boundaries) tensors.
     """
-    if bits not in (2, 3):
+    if bits not in (2, 3, 4):
         raise NotImplementedError(
-            f'Only 2-bit and 3-bit precomputed codebooks are supported, got bits={bits}'
+            f'Only 2-bit, 3-bit, and 4-bit precomputed codebooks are supported, got bits={bits}'
         )
 
     cache_key = (d, bits, str(device), 'codebook')
@@ -170,7 +173,7 @@ def get_lloyd_max_codebook(d: int, bits: int, device: str = 'cuda') -> tuple[Ten
             [-0.9815992, 0.0, 0.9815992],
             device=device, dtype=torch.float32
         )
-    else:  # bits == 3
+    elif bits == 3:
         # 3-bit Lloyd-Max centroids (K cache with QJL4)
         centroids_std = torch.tensor(
             [-2.1519456, -1.3439093, -0.7560052, -0.2450942,
@@ -184,6 +187,22 @@ def get_lloyd_max_codebook(d: int, bits: int, device: str = 'cuda') -> tuple[Ten
             device=device,
             dtype=torch.float32,
         )
+    else:  # bits == 4
+        # 4-bit Lloyd-Max centroids (weight quantization)
+        # Based on Gaussian N(0,1) distribution, 16 levels
+        # Computed via Lloyd-Max algorithm: symmetric around zero
+        centroids_std = torch.tensor([
+            -2.7943, -2.1384, -1.6884, -1.3222,
+            -0.9991, -0.7004, -0.4155, -0.1378,
+             0.1378,  0.4155,  0.7004,  0.9991,
+             1.3222,  1.6884,  2.1384,  2.7943
+        ], dtype=torch.float32, device=device)
+        boundaries_std = torch.tensor([
+            -2.4663, -1.9134, -1.5053, -1.1607,
+            -0.8498, -0.5579, -0.2766,  0.0000,
+             0.2766,  0.5579,  0.8498,  1.1607,
+             1.5053,  1.9134,  2.4663
+        ], dtype=torch.float32, device=device)
 
     centroids = centroids_std * sigma
     boundaries = boundaries_std * sigma

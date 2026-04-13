@@ -376,6 +376,8 @@ class PytorchEngineConfig:
         mp_engine_backend: backend of mp engine, options:
             ['mp', 'ray']. Default to `mp`.
         model_format: weight quantization policy, options: ['fp8'].
+        ignore_layers: list of layer names to not quantize. Only works
+            when model_format is 'turboquant'. Default to [].
         hf_overrides: Huggingface overrides for the model.
             It can be used to override the default config of the model,
         disable_vision_encoder: Whether to disable loading vision
@@ -420,6 +422,7 @@ class PytorchEngineConfig:
     enable_mp_engine: bool = False
     mp_engine_backend: str = 'mp'
     model_format: str = None
+    ignore_layers: list[str] = None
     enable_metrics: bool = True
     hf_overrides: dict[str, Any] | None = None
     disable_vision_encoder: bool = False

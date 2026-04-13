@@ -79,6 +79,7 @@ def build_executor(
         spec_method=None if specdecode_config is None else specdecode_config.method,
         num_spec_tokens=0 if specdecode_config is None else specdecode_config.num_speculative_tokens,
         model_format=misc_config.model_format,
+        ignore_layers=misc_config.ignore_layers,
         device_type=device_type,
         block_size=cache_config.block_size,
     )

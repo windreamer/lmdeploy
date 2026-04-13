@@ -1,4 +1,5 @@
 import gc
+import math
 
 import pytest
 import torch
@@ -290,3 +291,100 @@ class TestBackendInference:
         response = pipe.infer(prompt, gen_config=gen_config, enable_thinking=False)
         assert isinstance(response, Response)
         assert response.generate_token_len == 0
+
+
+# =============================================================================
+# TurboQuant Model Format Tests
+# =============================================================================
+
+class TestTurboQuantModelFormat:
+    """Test model_format='turboquant' (weight-only quantization)."""
+
+    MODEL_ID = 'Qwen/Qwen3-8B'
+
+    @pytest.fixture(scope='class')
+    def pipe(self):
+        engine_config = PytorchEngineConfig(
+            model_format='turboquant',
+            tp=1,
+            cache_max_entry_count=0.1,
+        )
+        pipe = pipeline(self.MODEL_ID, backend_config=engine_config, log_level='INFO')
+        yield pipe
+        pipe.close()
+        del pipe
+        gc.collect()
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            torch.cuda.empty_cache()
+
+    def test_pipeline_loads_successfully(self, pipe):
+        assert pipe is not None
+        assert pipe.async_engine is not None
+        print('  pipeline loaded successfully')
+
+    def test_inference_produces_valid_output(self, pipe):
+        prompt = 'Hello, how are you?'
+        response = pipe.infer(prompt, max_new_tokens=20, enable_thinking=False)
+
+        assert isinstance(response, Response)
+        assert len(response.text) > 0, 'Output text should not be empty'
+        assert response.generate_token_len > 0, 'Should generate some tokens'
+        print(f'  generated: {response.text[:50]}...')
+
+    def test_top1_token_not_collapsed(self, pipe):
+        """Check that first-step top1 is not the collapse token (198)."""
+        async_engine = pipe.async_engine
+        tokenizer = async_engine.tokenizer
+        prompt = 'Hello'
+        ids = tokenizer.encode(prompt, add_special_tokens=True)
+
+        fut = pipe._run(coro=async_engine.async_get_logits(input_ids=[ids]))
+        logits_list = fut.result()
+        logits = logits_list[0][-1].float().cpu()
+
+        assert not torch.isnan(logits).any(), 'Logits contain NaN'
+        assert not torch.isinf(logits).any(), 'Logits contain Inf'
+
+        top1_token = int(torch.argmax(logits).item())
+        print(f'  top1 token = {top1_token} ({repr(tokenizer.decode([top1_token]))})')
+
+        assert top1_token != 198, 'Model collapsed to token 198 at first step'
+
+    def test_logits_distribution_reasonable(self, pipe):
+        """Check that logits distribution is reasonable (not uniform or
+        collapsed)."""
+        async_engine = pipe.async_engine
+        tokenizer = async_engine.tokenizer
+        prompt = 'The capital of France is'
+        ids = tokenizer.encode(prompt, add_special_tokens=True)
+
+        fut = pipe._run(coro=async_engine.async_get_logits(input_ids=[ids]))
+        logits_list = fut.result()
+        logits = logits_list[0][-1].float().cpu()
+
+        probs = torch.softmax(logits, dim=-1)
+
+        max_prob = probs.max().item()
+        vocab_size = logits.shape[0]
+        expected_uniform = 1.0 / vocab_size
+        assert max_prob > expected_uniform * 10, \
+            f'Max prob {max_prob} too close to uniform {expected_uniform}'
+
+        entropy = -(probs * torch.log(probs + 1e-10)).sum().item()
+        max_entropy = math.log(vocab_size)
+        entropy_ratio = entropy / max_entropy
+        assert entropy_ratio > 0.15, \
+            f'Entropy ratio {entropy_ratio:.3f} too low, model may be collapsed'
+
+        print(f'  max_prob={max_prob:.4f}, entropy_ratio={entropy_ratio:.3f}')
+
+    def test_batch_inference(self, pipe):
+        prompts = ['Hello!', 'What is AI?', 'Tell me a joke']
+        responses = pipe.infer(prompts, max_new_tokens=10, enable_thinking=False)
+
+        assert isinstance(responses, list)
+        assert len(responses) == len(prompts)
+        for i, resp in enumerate(responses):
+            assert isinstance(resp, Response)
+            assert len(resp.text) > 0, f'Response {i} is empty'
+        print(f'  batch size = {len(responses)}')

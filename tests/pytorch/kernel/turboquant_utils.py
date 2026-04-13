@@ -239,3 +239,169 @@ def compute_metrics(a: torch.Tensor, b: torch.Tensor):
     noise = ((a - b) ** 2).mean().item()
     snr_db = 10 * math.log10(signal / (noise + 1e-10))
     return {'cosine': cosine, 'nmse': nmse, 'snr_db': snr_db}
+
+
+# ---------------------------------------------------------------------------
+# Fused kernel reference implementations (for turbo_quant_fused.py tests)
+# ---------------------------------------------------------------------------
+
+
+def unpack_4bit_indices(packed: torch.Tensor) -> torch.Tensor:
+    """Unpack 4-bit indices from packed uint8 tensor.
+
+    The fused kernel uses interleaved unpacking:
+    - Even indices (0, 2, 4, ...) take low nibble (bits 0-3)
+    - Odd indices (1, 3, 5, ...) take high nibble (bits 4-7)
+
+    Args:
+        packed: (N, K//2) uint8 tensor with 2 indices per byte
+
+    Returns:
+        (N, K) int64 tensor of indices
+    """
+    N, PACKED_K = packed.shape
+    K = PACKED_K * 2
+
+    lo = (packed & 0x0F).long()
+    hi = ((packed >> 4) & 0x0F).long()
+    indices = torch.stack([lo, hi], dim=2).reshape(N, K)
+
+    return indices[:, :K]
+
+
+def reference_fused_matmul(
+    x_rot: torch.Tensor,
+    indices_packed: torch.Tensor,
+    codebook: torch.Tensor,
+    norms: torch.Tensor,
+    group_size: int,
+    sigma_scale: float | None = None,
+) -> torch.Tensor:
+    """Reference implementation of fused dequant+matmul.
+
+    The fused kernel computes:
+        output[b, n] = sum_g norms_scaled[n, g] *
+                       sum_k input_rot[b, g*GS + k] * codebook[idx[n, g*GS + k]]
+
+    Note: codebook[idx] is already in the rotated domain, so no additional
+    Hadamard rotation is needed for the weights.
+
+    Args:
+        x_rot: (B, K) pre-rotated activations
+        indices_packed: (N, K//2) packed 4-bit indices
+        codebook: (16,) float32 Lloyd-Max centroids
+        norms: (N, n_groups) float32 per-row per-group norms
+        group_size: quantization group size
+        sigma_scale: sigma scaling factor (if None, computed from group_size)
+
+    Returns:
+        (B, N) float32 output
+    """
+    B, K = x_rot.shape
+    N = indices_packed.shape[0]
+    n_groups = norms.shape[1]
+
+    if sigma_scale is None:
+        sigma = 1.0 / math.sqrt(K)
+        sigma_scale = sigma * math.sqrt(group_size)
+
+    norms_scaled = norms / sigma_scale
+    indices = unpack_4bit_indices(indices_packed)
+    W_rot = codebook[indices].float()
+
+    acc = torch.zeros(B, N, dtype=torch.float32, device=x_rot.device)
+    for g in range(n_groups):
+        g_start = g * group_size
+        g_end = g_start + group_size
+        x_g = x_rot[:, g_start:g_end]
+        W_g = W_rot[:, g_start:g_end]
+        acc += torch.matmul(x_g, W_g.T) * norms_scaled[:, g]
+    output = acc
+
+    return output
+
+
+def reference_turboquant_forward(
+    x: torch.Tensor,
+    weight_packed: torch.Tensor,
+    codebook: torch.Tensor,
+    weight_norms: torch.Tensor,
+    in_features: int,
+    out_features: int,
+    group_size: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reference implementation of full turboquant forward.
+
+    Args:
+        x: (B, seq, K) or (B_flat, K) input activations
+        weight_packed: (N, K//2) packed 4-bit indices
+        codebook: (16,) float32 Lloyd-Max centroids
+        weight_norms: (N, n_groups) float32 per-row per-group norms
+        in_features: K
+        out_features: N
+        group_size: quantization group size
+        bias: optional (N,) bias
+
+    Returns:
+        Output tensor in same dtype as input
+    """
+    orig_shape = x.shape
+    orig_dtype = x.dtype
+
+    if x.dim() == 3:
+        B_flat = x.shape[0] * x.shape[1]
+        x_2d = x.reshape(B_flat, in_features)
+    elif x.dim() == 2:
+        B_flat = x.shape[0]
+        x_2d = x
+    else:
+        raise ValueError(f'Expected 2-D or 3-D input, got {x.dim()}-D')
+
+    x_f32 = x_2d.float()
+    n_groups = in_features // group_size
+
+    x_grouped = x_f32.reshape(B_flat, n_groups, group_size)
+    x_rot = hadamard_rotate(x_grouped).reshape(B_flat, in_features)
+
+    output = reference_fused_matmul(
+        x_rot=x_rot,
+        indices_packed=weight_packed,
+        codebook=codebook,
+        norms=weight_norms,
+        group_size=group_size,
+    )
+
+    if bias is not None:
+        output = output + bias.float()
+
+    out_dtype = orig_dtype if orig_dtype != torch.float32 else torch.bfloat16
+    output = output.to(out_dtype)
+
+    if len(orig_shape) == 3:
+        output = output.reshape(orig_shape[0], orig_shape[1], out_features)
+
+    return output
+
+
+def make_weight_packed(N: int, K: int) -> tuple:
+    """Create packed 4-bit weight indices and norms for testing.
+
+    Args:
+        N: number of output features
+        K: input features dimension
+
+    Returns:
+        weight_packed: (N, K//2) uint8
+        weight_norms: (N, n_groups) float32
+    """
+    n_groups = K // 128
+
+    indices = torch.randint(0, 16, (N, K), device='cuda')
+    lo = indices[:, 0::2]
+    hi = indices[:, 1::2] << 4
+    weight_packed = (lo | hi).to(torch.uint8)
+
+    weight_norms = torch.rand(N, n_groups, device='cuda') + 0.1
+
+    return weight_packed, weight_norms
