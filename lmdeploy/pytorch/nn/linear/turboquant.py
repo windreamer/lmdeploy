@@ -376,9 +376,22 @@ class TurboQuantQKVLinear(LinearBase):
         return w
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.is_cuda:
+            from lmdeploy.pytorch.kernels.cuda.turbo_quant_fused import (
+                turboquant_fused_forward,
+            )
+            return turboquant_fused_forward(
+                x=x,
+                weight_packed=self.weight.data,
+                codebook=self.codebook.data,
+                weight_norms=self.weight_norms.data,
+                in_features=self.in_features,
+                out_features=self.out_features,
+                group_size=self.group_size,
+                bias=None,
+            )
         w = self._dequantize_weight().to(x.dtype)
-        out = torch.matmul(x, w.t())
-        return out
+        return torch.matmul(x, w.t())
 
     def split_qkv(self, qkv_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split packed qkv tensor to the same contract as QKVBaseLinear."""
@@ -526,9 +539,22 @@ class MergedTurboQuantLinear(LinearBase):
         return w
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.is_cuda:
+            from lmdeploy.pytorch.kernels.cuda.turbo_quant_fused import (
+                turboquant_fused_forward,
+            )
+            return turboquant_fused_forward(
+                x=x,
+                weight_packed=self.weight.data,
+                codebook=self.codebook.data,
+                weight_norms=self.weight_norms.data,
+                in_features=self.in_features,
+                out_features=self.out_features,
+                group_size=self.group_size,
+                bias=None,
+            )
         w = self._dequantize_weight().to(x.dtype)
-        out = torch.matmul(x, w.t())
-        return out
+        return torch.matmul(x, w.t())
 
     def _weight_loader(self, param: torch.nn.Parameter, loaded_weight: torch.Tensor):
         if not self.is_tp:

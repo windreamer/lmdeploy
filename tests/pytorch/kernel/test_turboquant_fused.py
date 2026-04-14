@@ -81,8 +81,10 @@ class TestTritonFusedDequantMatmul:
         )
 
         # Verify numerical correctness (relaxed tolerance for floating point)
-        max_diff = (output_fused - output_ref).abs().max().item()
-        torch.testing.assert_close(output_fused, output_ref, atol=0.5, rtol=1e-2)
+        # Kernel returns fp16, reference returns fp32 - convert ref to fp16 for comparison
+        output_ref_fp16 = output_ref.to(torch.float16)
+        max_diff = (output_fused - output_ref_fp16).abs().max().item()
+        torch.testing.assert_close(output_fused, output_ref_fp16, atol=0.5, rtol=1e-2)
         print(f'  B={B}, N={N}, K={K}: max_diff={max_diff:.6f}')
 
     @pytest.mark.parametrize('B,N,K', [
@@ -110,7 +112,7 @@ class TestTritonFusedDequantMatmul:
         )
 
         assert output.shape == (B, N)
-        assert output.dtype == torch.float32
+        assert output.dtype == torch.float16
         print(f'  sigma_scale={sigma_scale}: output range=[{output.min():.3f}, {output.max():.3f}]')
 
     def test_output_shape(self, codebook):

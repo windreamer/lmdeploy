@@ -138,6 +138,10 @@ class TestTurboQuantLinearForward:
         W_bf16 = torch.randn(out_features, in_features, dtype=torch.bfloat16)
         tq_layer._weight_loader_with_quant(tq_layer.weight, W_bf16)
 
+        # Initialize bias (weight_loader_with_quant doesn't load bias)
+        bias = torch.randn(out_features, dtype=torch.float32, device='cuda')
+        tq_layer.bias.data.copy_(bias)
+
         # Create input
         x = torch.randn(batch_size, seq_len, in_features, dtype=torch.bfloat16).cuda()
         tq_layer = tq_layer.cuda()
