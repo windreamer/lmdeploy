@@ -21,21 +21,46 @@ from ..utils import get_distribute_size
 from .base import LinearBase
 
 
-def pack_4bit(indices: torch.Tensor) -> torch.Tensor:
-    """Pack 4-bit indices (0-15) into uint8, 2 per byte."""
-    assert indices.shape[-1] % 2 == 0, 'Last dim must be even for 4-bit packing'
-    lo = indices[..., 0::2].to(torch.uint8)
-    hi = indices[..., 1::2].to(torch.uint8)
-    return lo | (hi << 4)
+def pack_4bit(indices: torch.Tensor, group_size: int) -> torch.Tensor:
+    """Pack 4-bit indices (0-15) into uint8, 2 per byte.
 
+    Sequential layout: within each group, first half → lo nibble,
+    second half → hi nibble.
 
-def unpack_4bit(packed: torch.Tensor, n: int) -> torch.Tensor:
-    """Unpack uint8 -> 4-bit indices."""
-    lo = (packed & 0x0F).to(torch.int32)
-    hi = ((packed >> 4) & 0x0F).to(torch.int32)
-    result = torch.stack([lo, hi], dim=-1)
-    return result.reshape(*packed.shape[:-1], n)
+    packed[i] = indices[g*GS + i] | (indices[g*GS + HALF + i] << 4)
+    """
+    K = indices.shape[-1]
+    assert K % 2 == 0, f'Last dim must be even for 4-bit packing, got {K}'
+    gs = group_size if group_size > 0 else K
+    assert K % gs == 0, f'K={K} not divisible by group_size={gs}'
+    half = gs // 2
 
+    chunks = []
+    for g_start in range(0, K, gs):
+        lo = indices[..., g_start: g_start + half].to(torch.uint8)
+        hi = indices[..., g_start + half: g_start + gs].to(torch.uint8)
+        chunks.append(lo | (hi << 4))
+    return torch.cat(chunks, dim=-1)
+
+def unpack_4bit(packed: torch.Tensor, n: int, group_size: int = 0) -> torch.Tensor:
+    """Unpack uint8 → 4-bit indices (sequential layout).
+
+    Reverses pack_4bit: lo nibble = first half of group,
+    hi nibble = second half. concat(lo, hi) per group = original order.
+    """
+    gs = group_size if group_size > 0 else n
+    packed_gs = gs // 2
+
+    chunks = []
+    packed_k = packed.shape[-1]
+    for pg_start in range(0, packed_k, packed_gs):
+        block = packed[..., pg_start: pg_start + packed_gs]
+        lo = (block & 0x0F).to(torch.int32)
+        hi = ((block >> 4) & 0x0F).to(torch.int32)
+        chunks.append(lo)
+        chunks.append(hi)
+    result = torch.cat(chunks, dim=-1)
+    return result[..., :n]
 
 class TurboQuantLinear(LinearBase):
     """TurboQuant Linear layer with on-the-fly 4-bit dequantization."""
@@ -217,14 +242,14 @@ class TurboQuantLinear(LinearBase):
         if in_features % 2 != 0:
             full_indices = nn.functional.pad(full_indices, (0, 1), value=0)
 
-        packed = pack_4bit(full_indices)
+        packed = pack_4bit(full_indices, self.group_size)
         return {'indices_packed': packed, 'norms': norms_out}
 
     def _dequantize_weight(self) -> torch.Tensor:
         out_features, in_features = self.out_features, self.in_features
         device = self.weight.device
         codebook = self.codebook
-        indices = unpack_4bit(self.weight.data, in_features)
+        indices = unpack_4bit(self.weight.data, in_features, self.group_size)
         w = torch.zeros(out_features, in_features, dtype=torch.float32, device=device)
 
         for g_start in range(0, in_features, self.group_size):
@@ -371,7 +396,7 @@ class TurboQuantQKVLinear(LinearBase):
         device = self.weight.device
 
         codebook = self.codebook
-        indices = unpack_4bit(self.weight.data, in_features)
+        indices = unpack_4bit(self.weight.data, in_features, self.group_size)
 
         w = torch.zeros(out_features, in_features, dtype=torch.float32, device=device)
 
@@ -548,7 +573,7 @@ class MergedTurboQuantLinear(LinearBase):
         out_features, in_features = self.out_features, self.in_features
         device = self.weight.device
         codebook = self.codebook
-        indices = unpack_4bit(self.weight.data, in_features)
+        indices = unpack_4bit(self.weight.data, in_features, self.group_size)
         w = torch.zeros(out_features, in_features, dtype=torch.float32, device=device)
 
         for g_start in range(0, in_features, self.group_size):

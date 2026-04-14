@@ -246,28 +246,33 @@ def compute_metrics(a: torch.Tensor, b: torch.Tensor):
 # ---------------------------------------------------------------------------
 
 
-def unpack_4bit_indices(packed: torch.Tensor) -> torch.Tensor:
-    """Unpack 4-bit indices from packed uint8 tensor.
+def unpack_4bit_indices(packed: torch.Tensor, group_size: int = 128) -> torch.Tensor:
+    """Unpack 4-bit indices from packed uint8 tensor (sequential layout).
 
-    The fused kernel uses interleaved unpacking:
-    - Even indices (0, 2, 4, ...) take low nibble (bits 0-3)
-    - Odd indices (1, 3, 5, ...) take high nibble (bits 4-7)
+    Within each group of packed bytes:
+        lo nibble → first half of group
+        hi nibble → second half of group
+        concat(lo, hi) → original column order
 
     Args:
-        packed: (N, K//2) uint8 tensor with 2 indices per byte
+        packed: (N, K//2) uint8 tensor
+        group_size: quantization group size
 
     Returns:
-        (N, K) int64 tensor of indices
+        (N, K) int64 tensor of indices in original order
     """
     N, PACKED_K = packed.shape
     K = PACKED_K * 2
+    packed_gs = group_size // 2
 
-    lo = (packed & 0x0F).long()
-    hi = ((packed >> 4) & 0x0F).long()
-    indices = torch.stack([lo, hi], dim=2).reshape(N, K)
-
-    return indices[:, :K]
-
+    chunks = []
+    for pg_start in range(0, PACKED_K, packed_gs):
+        block = packed[:, pg_start: pg_start + packed_gs]
+        lo = (block & 0x0F).long()
+        hi = ((block >> 4) & 0x0F).long()
+        chunks.append(lo)   # first half
+        chunks.append(hi)   # second half
+    return torch.cat(chunks, dim=1)[:, :K]
 
 def reference_fused_matmul(
     x_rot: torch.Tensor,
@@ -277,22 +282,15 @@ def reference_fused_matmul(
     group_size: int,
     sigma_scale: float | None = None,
 ) -> torch.Tensor:
-    """Reference implementation of fused dequant+matmul.
-
-    The fused kernel computes:
-        output[b, n] = sum_g norms_scaled[n, g] *
-                       sum_k input_rot[b, g*GS + k] * codebook[idx[n, g*GS + k]]
-
-    Note: codebook[idx] is already in the rotated domain, so no additional
-    Hadamard rotation is needed for the weights.
+    """Reference implementation of fused dequant+matmul (sequential layout).
 
     Args:
         x_rot: (B, K) pre-rotated activations
-        indices_packed: (N, K//2) packed 4-bit indices
+        indices_packed: (N, K//2) packed 4-bit indices (sequential layout)
         codebook: (16,) float32 Lloyd-Max centroids
         norms: (N, n_groups) float32 per-row per-group norms
         group_size: quantization group size
-        sigma_scale: sigma scaling factor (if None, computed from group_size)
+        sigma_scale: sigma scaling factor (if None, computed from K and group_size)
 
     Returns:
         (B, N) float32 output
@@ -306,7 +304,7 @@ def reference_fused_matmul(
         sigma_scale = sigma * math.sqrt(group_size)
 
     norms_scaled = norms / sigma_scale
-    indices = unpack_4bit_indices(indices_packed)
+    indices = unpack_4bit_indices(indices_packed, group_size)
     W_rot = codebook[indices].float()
 
     acc = torch.zeros(B, N, dtype=torch.float32, device=x_rot.device)
@@ -316,10 +314,7 @@ def reference_fused_matmul(
         x_g = x_rot[:, g_start:g_end]
         W_g = W_rot[:, g_start:g_end]
         acc += torch.matmul(x_g, W_g.T) * norms_scaled[:, g]
-    output = acc
-
-    return output
-
+    return acc
 
 def reference_turboquant_forward(
     x: torch.Tensor,
@@ -331,11 +326,11 @@ def reference_turboquant_forward(
     group_size: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Reference implementation of full turboquant forward.
+    """Reference implementation of full turboquant forward (sequential layout).
 
     Args:
         x: (B, seq, K) or (B_flat, K) input activations
-        weight_packed: (N, K//2) packed 4-bit indices
+        weight_packed: (N, K//2) packed 4-bit indices (sequential layout)
         codebook: (16,) float32 Lloyd-Max centroids
         weight_norms: (N, n_groups) float32 per-row per-group norms
         in_features: K
@@ -383,25 +378,32 @@ def reference_turboquant_forward(
 
     return output
 
-
-def make_weight_packed(N: int, K: int) -> tuple:
+def make_weight_packed(N: int, K: int, group_size: int = 128) -> tuple:
     """Create packed 4-bit weight indices and norms for testing.
+
+    Uses SEQUENTIAL layout: within each group, first half → lo nibble,
+    second half → hi nibble.
 
     Args:
         N: number of output features
         K: input features dimension
+        group_size: quantization group size
 
     Returns:
-        weight_packed: (N, K//2) uint8
+        weight_packed: (N, K//2) uint8 (sequential layout)
         weight_norms: (N, n_groups) float32
     """
-    n_groups = K // 128
-
+    n_groups = K // group_size
+    half = group_size // 2
     indices = torch.randint(0, 16, (N, K), device='cuda')
-    lo = indices[:, 0::2]
-    hi = indices[:, 1::2] << 4
-    weight_packed = (lo | hi).to(torch.uint8)
+
+    # Sequential pack: first half → lo, second half → hi
+    chunks = []
+    for g_start in range(0, K, group_size):
+        lo = indices[:, g_start: g_start + half].to(torch.uint8)
+        hi = indices[:, g_start + half: g_start + group_size].to(torch.uint8)
+        chunks.append(lo | (hi << 4))
+    weight_packed = torch.cat(chunks, dim=1)
 
     weight_norms = torch.rand(N, n_groups, device='cuda') + 0.1
-
     return weight_packed, weight_norms

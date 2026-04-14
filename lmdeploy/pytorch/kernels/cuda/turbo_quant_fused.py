@@ -63,7 +63,7 @@ _AUTOTUNE_CONFIGS = [
 def _turboquant_fused_grouped_matmul_kernel(
     # --- inputs ---
     input_ptr,       # (B, FULL_K) fp16 — pre-rotated activations
-    indices_ptr,     # (N, FULL_K // 2) uint8 — packed 4-bit indices
+    indices_ptr,     # (N, FULL_K // 2) uint8 — sequential packed 4-bit indices
     codebook_ptr,    # (16,) fp16
     norms_ptr,       # (N, N_GROUPS) fp16 — pre-scaled norms
     # --- output ---
@@ -79,13 +79,11 @@ def _turboquant_fused_grouped_matmul_kernel(
     BLOCK_B: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """Fused 4-bit dequant + matmul with all groups in one kernel.
+    """Fused 4-bit dequant + matmul with sequential pack layout.
 
-    Each iteration processes one full group (PACKED_GS packed bytes = GS K-elements).  The codebook lookup produces raw
-    fp16 values WITHOUT norm scaling.  After the dot product, the per-group scalar norm is applied via a broadcast
-    multiply on the (BLOCK_B, BLOCK_N) partial sum.  This allows Triton's software pipelining to overlap the next
-    iteration's memory loads with the current iteration's norm multiply, eliminating ~50% of the dequant overhead
-    compared to norm-before-dot.
+    Sequential pack: lo nibble = first half of group, hi nibble = second half.
+    Two contiguous half-size dots per group, both input and weight loads are
+    fully coalesced. No tl.join needed. Safe on all architectures.
 
     output[b, n] = sum_g  norms[n, g] * sum_k  x_rot[b, g*GS+k] * cb[idx[n, g*GS+k]]
     """
@@ -97,10 +95,7 @@ def _turboquant_fused_grouped_matmul_kernel(
     mask_b = rb < B
     mask_n = rn < N
 
-    # BLOCK_K = full group size in K-space (PACKED_GS * 2)
-    BLOCK_K: tl.constexpr = PACKED_GS * 2
-
-    # Final accumulator across all groups — lives in registers.
+    HALF: tl.constexpr = PACKED_GS
     acc = tl.zeros((BLOCK_B, BLOCK_N), dtype=tl.float32)
 
     for g in range(N_GROUPS):
@@ -108,36 +103,44 @@ def _turboquant_fused_grouped_matmul_kernel(
         rpk = pk_start + tl.arange(0, PACKED_GS)
         w_mask = mask_n[:, None] & (rpk < PACKED_K)[None, :]
 
-        # ---- Load packed weight bytes: (BLOCK_N, PACKED_GS) ----
+        # ---- Load packed weight bytes once: (BLOCK_N, PACKED_GS) ----
         packed = tl.load(
             indices_ptr + rn[:, None] * PACKED_K + rpk[None, :],
             mask=w_mask, other=0,
         )
 
-        # ---- Unpack 4-bit indices ----
+        # ---- Unpack: lo = first half, hi = second half ----
         idx_lo = (packed & 0x0F).to(tl.int32)
         idx_hi = ((packed >> 4) & 0x0F).to(tl.int32)
 
-        # ---- Codebook gather (16 entries, 32 B fp16 → L1/regs) ----
+        # ---- Codebook gather: two (BLOCK_N, HALF) tiles ----
         val_lo = tl.load(codebook_ptr + idx_lo, mask=w_mask, other=0.0).to(tl.float16)
         val_hi = tl.load(codebook_ptr + idx_hi, mask=w_mask, other=0.0).to(tl.float16)
 
-        # ---- Interleave in registers: (BLOCK_N, PACKED_GS, 2) → (BLOCK_N, BLOCK_K) ----
-        w_tile = tl.reshape(tl.join(val_lo, val_hi), (BLOCK_N, BLOCK_K))
+        # ---- Input: two contiguous halves ----
+        k_base = g * HALF * 2   # = g * group_size
+        rk_lo = k_base + tl.arange(0, HALF)
+        rk_hi = k_base + HALF + tl.arange(0, HALF)
 
-        # ---- Load input tile: (BLOCK_B, BLOCK_K) contiguous ----
-        k_start = g * BLOCK_K
-        rk = k_start + tl.arange(0, BLOCK_K)
-        inp_mask = mask_b[:, None] & (rk < FULL_K)[None, :]
-        x_tile = tl.load(
-            input_ptr + rb[:, None] * FULL_K + rk[None, :],
-            mask=inp_mask, other=0.0,
+        mask_lo = mask_b[:, None] & (rk_lo < FULL_K)[None, :]
+        mask_hi = mask_b[:, None] & (rk_hi < FULL_K)[None, :]
+
+        x_lo = tl.load(
+            input_ptr + rb[:, None] * FULL_K + rk_lo[None, :],
+            mask=mask_lo, other=0.0,
+        ).to(tl.float16)
+        x_hi = tl.load(
+            input_ptr + rb[:, None] * FULL_K + rk_hi[None, :],
+            mask=mask_hi, other=0.0,
         ).to(tl.float16)
 
-        # ---- Dot product WITHOUT norm: (BLOCK_B, BLOCK_K) @ (BLOCK_N, BLOCK_K)^T ----
-        partial = tl.dot(x_tile, tl.trans(w_tile), allow_tf32=True)
+        # ---- Two half-size dots with fully contiguous data ----
+        partial = (
+            tl.dot(x_lo, tl.trans(val_lo), allow_tf32=True)
+            + tl.dot(x_hi, tl.trans(val_hi), allow_tf32=True)
+        )
 
-        # ---- Apply per-group norm AFTER dot (overlaps with next iteration's loads) ----
+        # ---- Apply per-group norm AFTER dot ----
         norms_g = tl.load(norms_ptr + rn * N_GROUPS + g, mask=mask_n, other=1.0)
         acc += partial * norms_g[None, :]
 
