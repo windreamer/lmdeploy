@@ -105,9 +105,10 @@ class TurboQuantLinear(LinearBase):
         if boundaries is not None:
             self.register_buffer('_boundaries', boundaries)
 
-        self._setup_loaders()
+        self.setup_loaders()
 
-    def _setup_loaders(self):
+    def setup_loaders(self):
+        """Setup weight loaders."""
         self.weight.weight_loader = self._weight_loader_with_quant
         self.weight_norms.weight_loader = self._weight_loader
         if self.bias is not None:
@@ -283,7 +284,22 @@ class TurboQuantLinear(LinearBase):
         return self._forward_default(x, all_reduce, tp_sizes)
 
     def update_weights(self):
-        pass
+        """Update weights."""
+        self.register_all_parameters(self.weight, self.weight_norms, self.bias)
+
+    def register_all_parameters(self,
+                                weight: torch.Tensor,
+                                weight_norms: torch.Tensor,
+                                bias: torch.Tensor | None = None):
+        """Register all parameters."""
+        weight = torch.nn.Parameter(weight, requires_grad=False)
+        weight_norms = torch.nn.Parameter(weight_norms, requires_grad=False)
+        if bias is not None:
+            bias = torch.nn.Parameter(bias, requires_grad=False)
+        self.register_parameter('weight', weight)
+        self.register_parameter('weight_norms', weight_norms)
+        self.register_parameter('bias', bias)
+        self.setup_loaders()
 
     def get_dequantized_weight(self) -> torch.Tensor:
         return self._dequantize_weight().to(torch.bfloat16)
@@ -343,9 +359,10 @@ class TurboQuantQKVLinear(LinearBase):
         self.group_size = q_proj.group_size
         self.bit_width = q_proj.bit_width
 
-        self._setup_loaders()
+        self.setup_loaders()
 
-    def _setup_loaders(self):
+    def setup_loaders(self):
+        """Setup weight loaders."""
         self.weight.weight_loader = self.weight_loader
         self.weight_norms.weight_loader = self.weight_loader
 
@@ -443,7 +460,18 @@ class TurboQuantQKVLinear(LinearBase):
                 self.weight_norms.data[start_idx:end_idx].copy_(loaded_weight)
 
     def update_weights(self):
-        pass
+        """Update weights."""
+        self.register_all_parameters(self.weight, self.weight_norms)
+
+    def register_all_parameters(self,
+                                weight: torch.Tensor,
+                                weight_norms: torch.Tensor):
+        """Register all parameters."""
+        weight = torch.nn.Parameter(weight, requires_grad=False)
+        weight_norms = torch.nn.Parameter(weight_norms, requires_grad=False)
+        self.register_parameter('weight', weight)
+        self.register_parameter('weight_norms', weight_norms)
+        self.setup_loaders()
 
     def __repr__(self):
         return f'TurboQuantQKVLinear(q_proj={self.q_proj}, k_proj={self.k_proj}, v_proj={self.v_proj})'
@@ -501,9 +529,10 @@ class MergedTurboQuantLinear(LinearBase):
         if boundaries is not None:
             self.register_buffer('_boundaries', boundaries)
 
-        self._setup_loaders()
+        self.setup_loaders()
 
-    def _setup_loaders(self):
+    def setup_loaders(self):
+        """Setup weight loaders."""
         self.weight.weight_loader = self.weight_loader
         self.weight_norms.weight_loader = self.weight_loader
 
@@ -623,7 +652,18 @@ class MergedTurboQuantLinear(LinearBase):
                 self.weight_norms.data[start_idx:end_idx].copy_(loaded_weight)
 
     def update_weights(self):
-        pass
+        """Update weights."""
+        self.register_all_parameters(self.weight, self.weight_norms)
+
+    def register_all_parameters(self,
+                                weight: torch.Tensor,
+                                weight_norms: torch.Tensor):
+        """Register all parameters."""
+        weight = torch.nn.Parameter(weight, requires_grad=False)
+        weight_norms = torch.nn.Parameter(weight_norms, requires_grad=False)
+        self.register_parameter('weight', weight)
+        self.register_parameter('weight_norms', weight_norms)
+        self.setup_loaders()
 
     def __repr__(self):
         return f'MergedTurboQuantLinear(layers={self.layers})'
