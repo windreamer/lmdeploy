@@ -22,6 +22,8 @@
 #   - 16-entry codebook (32 bytes fp16) stays in L1 after first access.
 #   - fp16 tensor-core MMA via allow_tf32=True on Ampere+ / Ada / Hopper.
 #   - Pre-scaled norms (norms / scale) computed once on the host.
+#   - B is bucketed to next-power-of-2 for autotune key to avoid
+#     recompilation on every new sequence length.
 """Triton fused dequant + matmul kernels for TurboQuant."""
 from __future__ import annotations
 
@@ -32,6 +34,20 @@ import triton
 import triton.language as tl
 
 from lmdeploy.pytorch.kernels.cuda.turbo_quant import hadamard_rotate
+
+
+# ---------------------------------------------------------------------------
+# Autotune bucket helper
+# ---------------------------------------------------------------------------
+def _bucket_size(n: int) -> int:
+    """Round *n* up to the next power of 2, with a minimum of 16.
+
+    This keeps the number of distinct autotune keys small (≤ ~12 buckets for typical sequence lengths) so that Triton
+    only compiles each kernel config once per bucket rather than once per unique sequence length.
+    """
+    n = max(16, n)
+    return triton.next_power_of_2(n)
+
 
 # ---------------------------------------------------------------------------
 # Autotune configurations
@@ -58,7 +74,7 @@ _AUTOTUNE_CONFIGS = [
 # ---------------------------------------------------------------------------
 # Fused kernel — all groups processed in one launch, norm applied after dot
 # ---------------------------------------------------------------------------
-@triton.autotune(configs=_AUTOTUNE_CONFIGS, key=['B', 'N', 'N_GROUPS'])
+@triton.autotune(configs=_AUTOTUNE_CONFIGS, key=['B_NP2', 'N', 'N_GROUPS'])
 @triton.jit
 def _turboquant_fused_grouped_matmul_kernel(
     # --- inputs ---
@@ -69,12 +85,13 @@ def _turboquant_fused_grouped_matmul_kernel(
     # --- output ---
     output_ptr,      # (B, N) fp16
     # --- scalar dims ---
-    B,               # batch (flattened B*seq)
+    B,               # batch (flattened B*seq) — REAL size for masking
     N,               # out_features
     FULL_K,          # in_features
     PACKED_K,        # FULL_K // 2
     PACKED_GS: tl.constexpr,   # group_size // 2
     N_GROUPS: tl.constexpr,
+    B_NP2: tl.constexpr,       # bucketed B — ONLY used as autotune key
     # --- tile sizes (from autotune) ---
     BLOCK_B: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -86,13 +103,17 @@ def _turboquant_fused_grouped_matmul_kernel(
     fully coalesced. No tl.join needed. Safe on all architectures.
 
     output[b, n] = sum_g  norms[n, g] * sum_k  x_rot[b, g*GS+k] * cb[idx[n, g*GS+k]]
+
+    Note: B_NP2 is only present so that Triton's autotune mechanism can
+    bucket different sequence lengths together.  The kernel itself uses the
+    real ``B`` for all masking and pointer arithmetic.
     """
     pid_b = tl.program_id(0)
     pid_n = tl.program_id(1)
 
     rb = pid_b * BLOCK_B + tl.arange(0, BLOCK_B)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    mask_b = rb < B
+    mask_b = rb < B          # real B, not B_NP2
     mask_n = rn < N
 
     HALF: tl.constexpr = PACKED_GS
@@ -191,9 +212,12 @@ def triton_fused_dequant_matmul(
 
     output = torch.empty(B, N, dtype=torch.float16, device=x_rot.device)
 
+    # Bucket B so that autotune reuses compiled kernels across similar sizes
+    B_NP2 = _bucket_size(B)
+
     def grid(META):
         return (
-            triton.cdiv(B, META['BLOCK_B']),
+            triton.cdiv(B, META['BLOCK_B']),   # grid uses real B
             triton.cdiv(N, META['BLOCK_N']),
         )
 
@@ -206,6 +230,7 @@ def triton_fused_dequant_matmul(
         B, N, in_features, PACKED_K,
         PACKED_GS=group_size // 2,
         N_GROUPS=n_groups,
+        B_NP2=B_NP2,
     )
 
     return output
