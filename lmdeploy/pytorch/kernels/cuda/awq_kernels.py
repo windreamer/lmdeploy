@@ -4,19 +4,6 @@ import triton
 from triton import language as tl
 
 
-def get_cuda_autotune_config():
-    return [
-        triton.Config({
-            'BLOCK_SIZE_N': 64,
-            'GROUP_SIZE_M': 8,
-        }, num_stages=3, num_warps=4),
-        triton.Config({
-            'BLOCK_SIZE_N': 128,
-            'GROUP_SIZE_M': 8,
-        }, num_stages=3, num_warps=4),
-    ]
-
-
 @triton.jit
 def _dequant_s4_to_f16x2(weight, shift: tl.constexpr, is_top: tl.constexpr):
 
@@ -81,11 +68,79 @@ def _unpack_weight(weight):
 
     return weight.reshape(BLOCK_SIZE_K, BLOCK_SIZE_N)
 
+def get_cuda_autotune_config():
+    return [
+        triton.Config({'BLOCK_SIZE_N': 64,  'GROUP_SIZE_M': 8, 'SPLIT_K': 1, 'NUM_STAGES': 2}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'GROUP_SIZE_M': 8, 'SPLIT_K': 1, 'NUM_STAGES': 2}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'GROUP_SIZE_M': 8, 'SPLIT_K': 1, 'NUM_STAGES': 3}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'GROUP_SIZE_M': 8, 'SPLIT_K': 1, 'NUM_STAGES': 3}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_N': 128, 'GROUP_SIZE_M': 8, 'SPLIT_K': 1, 'NUM_STAGES': 5}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_N': 256, 'GROUP_SIZE_M': 8, 'SPLIT_K': 1, 'NUM_STAGES': 3}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_N': 256, 'GROUP_SIZE_M': 8, 'SPLIT_K': 1, 'NUM_STAGES': 5}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_N': 64,  'GROUP_SIZE_M': 8, 'SPLIT_K': 2, 'NUM_STAGES': 2}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'GROUP_SIZE_M': 8, 'SPLIT_K': 2, 'NUM_STAGES': 3}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 256, 'GROUP_SIZE_M': 8, 'SPLIT_K': 2, 'NUM_STAGES': 3}, num_warps=8),
+        triton.Config({'BLOCK_SIZE_N': 64,  'GROUP_SIZE_M': 8, 'SPLIT_K': 4, 'NUM_STAGES': 2}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'GROUP_SIZE_M': 8, 'SPLIT_K': 4, 'NUM_STAGES': 3}, num_warps=4),
+    ]
+
+_MAX_STAGES = None
+_MIN_STAGES = None
+
+def _init_stages():
+    global _MAX_STAGES, _MIN_STAGES
+    if _MAX_STAGES is not None:
+        return
+    props = torch.cuda.get_device_properties(0)
+    if props.major >= 9:                        # Hopper
+        _MIN_STAGES = 3
+        _MAX_STAGES = 5
+    elif props.major == 8 and props.minor == 0: # A100
+        _MIN_STAGES = 3
+        _MAX_STAGES = 5
+    elif props.major == 8:                      # Ada/A10
+        _MIN_STAGES = 2
+        _MAX_STAGES = 3
+    else:                                       # Volta/Turing
+        _MIN_STAGES = 2
+        _MAX_STAGES = 2
+
+
+def _awq_config_pruner(configs, nargs, **kwargs):
+    _init_stages()
+    n = nargs['N']
+    k = nargs['K']
+    num_groups = k // 128
+
+    used = set()
+    for config in configs:
+        bsn = config.kwargs['BLOCK_SIZE_N']
+        sk = config.kwargs['SPLIT_K']
+        ns = config.kwargs['NUM_STAGES']
+        nw = config.num_warps
+
+        if bsn > n:
+            continue
+        if ns > _MAX_STAGES:
+            continue
+        if ns < _MIN_STAGES:
+            continue
+        if sk > 1 and num_groups // sk < 4:
+            continue
+
+        key = (bsn, sk, ns, nw)
+        if key in used:
+            continue
+        used.add(key)
+        yield config
+
+
 
 @triton.autotune(
     configs=get_cuda_autotune_config(),
     key=['N', 'K'],
     reset_to_zero=['c_ptr'],
+    prune_configs_by={'early_config_prune': _awq_config_pruner},
 )
 @triton.jit
 def awq_linear_kernel(
@@ -208,63 +263,160 @@ def awq_linear_kernel(
     else:
         tl.store(c_ptrs, c, mask=c_mask)
 
+@triton.jit
+def _unpack_npack_fast(packed, meta_dtype):
+    """Unpack [BLOCK_K, BLOCK_QN] int32 → [BLOCK_K, BLOCK_QN*8] fp16."""
+    BLOCK_K: tl.constexpr = packed.shape[0]
+    BLOCK_QN: tl.constexpr = packed.shape[1]
+    BLOCK_N: tl.constexpr = BLOCK_QN * 8
+    shifts = tl.arange(0, 8) * 4
+    w = (packed[:, :, None] >> shifts[None, None, :]) & 0xF
+    w = w.reshape(BLOCK_K, BLOCK_N)
+    if meta_dtype == tl.float16:
+        return w.to(tl.float16)
+    else:
+        return w.to(tl.bfloat16)
+
+
+_GEMV_CFGS = [
+    (128, 32, 2),
+    (256, 32, 2),
+    (512, 32, 4),
+]
+
+
+def _gemv_configs():
+    return [
+        triton.Config(
+            {'BLOCK_N': c[0], 'BLOCK_K': c[1]},
+            num_warps=c[2],
+            num_stages=1,
+            pre_hook=lambda nargs: nargs['c_ptr'].zero_(),
+        )
+        for c in _GEMV_CFGS
+    ]
+
+
+@triton.autotune(
+    configs=_gemv_configs(),
+    key=['N', 'K', 'group_size'],
+)
+@triton.jit
+def awq_gemv_kernel(
+    a_ptr, qw_ptr, s_ptr, qz_ptr, c_ptr,
+    N: tl.constexpr, K: tl.constexpr, group_size: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_wk: tl.constexpr, stride_wn: tl.constexpr,
+    stride_sk: tl.constexpr, stride_sn: tl.constexpr,
+    stride_zk: tl.constexpr, stride_zn: tl.constexpr,
+    stride_cn: tl.constexpr,
+    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    """GEMV for BS=1 with packed weights AND packed zeros."""
+    BLOCK_QN: tl.constexpr = BLOCK_N // 8
+
+    pid_n = tl.program_id(0)
+    pid_k = tl.program_id(1) * 2
+
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_qn = pid_n * BLOCK_QN + tl.arange(0, BLOCK_QN)
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+
+    # metadata: scales are [G, N] fp16, qzeros are [G, N//8] int32
+    g = pid_k * BLOCK_K // group_size
+    scales = tl.load(
+        s_ptr + g * stride_sk + offs_n * stride_sn,
+        mask=offs_n < N, other=0.0,
+    ).to(tl.float16)
+
+    qz_packed = tl.load(
+        qz_ptr + g * stride_zk + offs_qn * stride_zn,
+        mask=offs_qn < (N // 8), other=0,
+    )
+    zeros = _unpack_npack_fast(qz_packed.reshape(1, BLOCK_QN), tl.float16).reshape(BLOCK_N)
+
+    # ── First K-block ──
+    a = tl.load(a_ptr + offs_k * stride_ak, mask=offs_k < K, other=0.0).to(tl.float32)
+    qw = tl.load(
+        qw_ptr + offs_k[:, None] * stride_wk + offs_qn[None, :] * stride_wn,
+        mask=(offs_k[:, None] < K) & (offs_qn[None, :] < (N // 8)), other=0,
+    )
+    w = _unpack_npack_fast(qw, tl.float16)
+    w = ((w - zeros[None, :]) * scales[None, :]).to(tl.float32)
+    acc = tl.sum(a[:, None] * w, axis=0)
+
+    # ── Second K-block ──
+    offs_k2 = offs_k + BLOCK_K
+    a2 = tl.load(a_ptr + offs_k2 * stride_ak, mask=offs_k2 < K, other=0.0).to(tl.float32)
+    qw2 = tl.load(
+        qw_ptr + offs_k2[:, None] * stride_wk + offs_qn[None, :] * stride_wn,
+        mask=(offs_k2[:, None] < K) & (offs_qn[None, :] < (N // 8)), other=0,
+    )
+    w2 = _unpack_npack_fast(qw2, tl.float16)
+    w2 = ((w2 - zeros[None, :]) * scales[None, :]).to(tl.float32)
+    acc += tl.sum(a2[:, None] * w2, axis=0)
+
+    # ── Store ──
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_cn = tl.max_contiguous(tl.multiple_of(offs_cn, BLOCK_N), BLOCK_N)
+    tl.atomic_add(c_ptr + offs_cn * stride_cn, acc.to(tl.float16),
+                  mask=offs_cn < N, sem='relaxed')
+
+
+def _get_block_size_m(M):
+    if M <= 16:
+        return 16
+    elif M <= 64:
+        return 64
+    else:
+        return 128
+
 
 def awq_linear(x, qweight, scales, qzeros):
-    """Awq linear."""
     M = x.size(0)
     K = qweight.size(0)
     N = scales.size(1)
     group_size = K // scales.size(0)
-    SPLIT_K = max(1, K // 4096)
 
+    # BS=1: GEMV
+    if M == 1:
+        out = torch.zeros(1, N, dtype=x.dtype, device=x.device)
+        def grid(meta):
+            return (
+                    triton.cdiv(N, meta['BLOCK_N']),
+                    triton.cdiv(K, meta['BLOCK_K'] * 2),
+                )
+        awq_gemv_kernel[grid](
+            x, qweight, scales, qzeros, out,
+            N, K, group_size,
+            x.stride(1),
+            qweight.stride(0), qweight.stride(1),
+            scales.stride(0), scales.stride(1),
+            qzeros.stride(0), qzeros.stride(1),
+            out.stride(1),
+        )
+        return out
+
+    # BS>1: GEMM
     def grid(META):
-        """grid."""
         return (
             triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
-            SPLIT_K,
+            META['SPLIT_K'],
         )
 
-    if SPLIT_K > 1:
-        out = scales.new_zeros(M, N)
-    else:
-        out = scales.new_empty(M, N)
+    out = torch.zeros(M, N, dtype=x.dtype, device=x.device)
 
-    props = torch.cuda.get_device_properties(x.device)
-    if props.major == 9:
-        num_stages = 2
-    elif props.major == 8 and props.minor in [6, 9]:
-        num_stages = 2
-    else:
-        num_stages = 3
+    BLOCK_SIZE_M = _get_block_size_m(M)
 
-    BLOCK_SIZE_M = triton.next_power_of_2(M)
-    BLOCK_SIZE_M = max(16, min(128, BLOCK_SIZE_M))
     awq_linear_kernel[grid](
-        # Pointers to matrices
-        x,
-        qweight,
-        scales,
-        qzeros,
-        out,
-        # Matrix dimensions
-        M,
-        N,
-        K,
-        stride_am=x.stride(0),
-        stride_ak=x.stride(1),  #
-        stride_wk=qweight.stride(0),
-        stride_wn=qweight.stride(1),  #
-        stride_sk=scales.stride(0),
-        stride_sn=scales.stride(1),  #
-        stride_zk=qzeros.stride(0),
-        stride_zn=qzeros.stride(1),  #
-        stride_cm=out.stride(0),
-        stride_cn=out.stride(1),
-        # Meta-parameters
+        x, qweight, scales, qzeros, out,
+        M, N, K,
+        stride_am=x.stride(0), stride_ak=x.stride(1),
+        stride_wk=qweight.stride(0), stride_wn=qweight.stride(1),
+        stride_sk=scales.stride(0), stride_sn=scales.stride(1),
+        stride_zk=qzeros.stride(0), stride_zn=qzeros.stride(1),
+        stride_cm=out.stride(0), stride_cn=out.stride(1),
         BLOCK_SIZE_M=BLOCK_SIZE_M,
         BLOCK_SIZE_K=group_size,
-        SPLIT_K=SPLIT_K,
-        NUM_STAGES=num_stages,
     )
-
     return out
