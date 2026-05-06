@@ -479,12 +479,9 @@ class FusedLogitsProcessor:
             result = __random_sampling(scores, indices)
 
         if self.guided_decoding_manager and self.guided_processors:
+            cpu_result = result.cpu()
             for i, processor in self.guided_processors.items():
-                token = result[i]
-                if hasattr(token, 'item'):
-                    token = token.item()
-
-                self.guided_decoding_manager.accept_token(processor, int(token))
+                self.guided_decoding_manager.accept_token(processor, int(cpu_result[i].item()))
 
         return result
 
