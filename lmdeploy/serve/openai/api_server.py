@@ -417,14 +417,16 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
 
     random_seed = request.seed if request.seed is not None else None
     max_new_tokens = (request.max_completion_tokens if request.max_completion_tokens else request.max_tokens)
-    response_format = None
-    if request.response_format and request.response_format.type != 'text':
-        response_format = request.response_format.model_dump()
 
     parser_cls = VariableInterface.response_parser_cls
     response_parser = parser_cls(request=request, tokenizer=tokenizer)
-    # request might be adjusted by tool parser
+    # request might be adjusted by the response parser (e.g. GPT-OSS clears
+    # response_format and injects the schema into messages instead)
     request = response_parser.request
+
+    response_format = None
+    if request.response_format and request.response_format.type != 'text':
+        response_format = request.response_format.model_dump()
 
     gen_config = GenerationConfig(
         max_new_tokens=max_new_tokens,

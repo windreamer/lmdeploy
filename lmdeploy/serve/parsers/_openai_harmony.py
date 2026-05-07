@@ -3,6 +3,7 @@
 available."""
 from __future__ import annotations
 
+import json
 import re
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from lmdeploy.serve.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
+from lmdeploy.utils import get_logger
 
 from .response_parser import ResponseParser, ResponseParserManager
 
@@ -23,6 +25,8 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
     from lmdeploy.serve.openai.protocol import ChatCompletionRequest
+
+logger = get_logger('lmdeploy')
 
 _harmony_encoding = None
 
@@ -55,6 +59,7 @@ class GptOssResponseParser(ResponseParser):
         else:
             # Unit tests may inject a lightweight sentinel request object.
             self.request = request
+        self._convert_response_format_to_harmony()
         self.model_tokenizer = tokenizer
         self.parser = StreamableParser(get_encoding(), role=Role.ASSISTANT)
         self._seen_any = False
@@ -63,6 +68,51 @@ class GptOssResponseParser(ResponseParser):
         self._active_tool_index: int | None = None
         self._active_tool_name: str | None = None
         self.tool_parser = object()  # API server checks `is not None` for tool support.
+
+    def _convert_response_format_to_harmony(self):
+        """Convert response_format to Harmony-native mode for GPT-OSS.
+
+        GPT-OSS uses Harmony mode for structured output, which conflicts with
+        the engine's built-in JSON/response-format mode. This method injects
+        the response_format schema into the system prompt as a
+        ``# Response Formats`` section and clears ``response_format`` on the
+        request so that only the Harmony-native instructions are used.
+        """
+        fmt = getattr(self.request, 'response_format', None)
+        if fmt is None or getattr(fmt, 'type', 'text') == 'text':
+            return
+
+        try:
+            format_json = json.dumps(fmt.model_dump())
+            format_section = f'\n\n# Response Formats\n{format_json}'
+            messages = self.request.messages
+
+            if not isinstance(messages, list):
+                logger.warning('Cannot inject response_format schema into '
+                               'non-list messages for GPT-OSS; clearing response_format only.')
+                self.request = self.request.model_copy(update={'response_format': None})
+                return
+
+            new_messages = list(messages)
+            system_idx = next(
+                (i for i, msg in enumerate(new_messages) if isinstance(msg, dict) and msg.get('role') == 'system'),
+                None,
+            )
+
+            if system_idx is not None:
+                content = new_messages[system_idx].get('content') or ''
+                new_messages[system_idx] = {**new_messages[system_idx], 'content': content + format_section}
+            else:
+                new_messages.insert(0, {'role': 'system', 'content': format_section})
+
+            self.request = self.request.model_copy(update={
+                'response_format': None,
+                'messages': new_messages,
+            })
+        except Exception as e:
+            logger.error(f'Failed to convert response_format to Harmony-native mode for GPT-OSS: {e}')
+            # Still clear response_format to avoid the Harmony/JSON mode conflict
+            self.request = self.request.model_copy(update={'response_format': None})
 
     def stream_chunk(self, delta_text: str, delta_token_ids: list[int], **kwargs) -> tuple[DeltaMessage | None, bool]:
         if (
