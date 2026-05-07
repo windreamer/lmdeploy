@@ -84,7 +84,7 @@ class GptOssResponseParser(ResponseParser):
 
         try:
             format_json = json.dumps(fmt.model_dump())
-            format_section = f'\n\n# Response Formats\n{format_json}'
+            format_body = f'# Response Formats\n{format_json}'
             messages = self.request.messages
 
             if not isinstance(messages, list):
@@ -101,9 +101,12 @@ class GptOssResponseParser(ResponseParser):
 
             if system_idx is not None:
                 content = new_messages[system_idx].get('content') or ''
-                new_messages[system_idx] = {**new_messages[system_idx], 'content': content + format_section}
+                new_messages[system_idx] = {
+                    **new_messages[system_idx],
+                    'content': content + '\n\n' + format_body,
+                }
             else:
-                new_messages.insert(0, {'role': 'system', 'content': format_section})
+                new_messages.insert(0, {'role': 'system', 'content': format_body})
 
             self.request = self.request.model_copy(update={
                 'response_format': None,
