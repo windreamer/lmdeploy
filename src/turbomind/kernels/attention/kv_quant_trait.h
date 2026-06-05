@@ -29,7 +29,7 @@ struct KvQuantTurbo {
 };
 
 // ---------------------------------------------------------------------------
-// KvQuantTrait<Tag> — central type trait for KV cache quantization
+// KvQuantTrait<Tag, T> — central type trait for KV cache quantization
 // ---------------------------------------------------------------------------
 // Provides all derived types and constants needed by the attention kernel
 // pipeline.  Each tag maps to a full set of properties for K and V
@@ -37,16 +37,32 @@ struct KvQuantTurbo {
 // TurboQuant: K=4bit QJL4, V=2bit MSE).
 //
 // Trait members:
-//   StorageK / StorageV   — raw KV cache element type
-//   PointerK / PointerV   — pointer type for accessing KV data (T* or SubBytePtr)
-//   kBitsK / kBitsV       — bit-width of StorageK / StorageV
-//   kQuantKV              — whether quantization is active (K or V differs from T)
-//   kParamCountK / kParamCountV — # of param values per token per head
-//   kv_quant              — runtime integer descriptor for kernel dispatch
-//   kHadamardRotate       — whether Hadamard rotation is applied
-//   EncoderK / EncoderV   — store-path converter (T → StorageK/V)
-//   DecoderK / DecoderV   — load-path converter (StorageK/V → T)
+//   StorageK / StorageV       — raw KV cache element type
+//   PointerK / PointerV       — pointer type for accessing KV data (T* or SubBytePtr)
+//   kBitsK / kBitsV           — bit-width of StorageK / StorageV
+//   kQuantKV                  — whether quantization is active (K or V differs from T)
+//   kParamCountK / kParamCountV — # of quant params per token per head
+//     0 for unquantized (KvQuantNone), 2 for all quantized schemes.
+//   kv_quant                  — runtime integer descriptor for kernel dispatch
+//   kHadamardRotate           — whether Hadamard rotation is applied
+//   DequantK / DequantV       — dequantizer policy type for K / V
+//     Each must provide:
+//       __device__ static T apply(T val, T p0, T p1, int head_dim);
+//     Where val = bit-unpacked value, p0/p1 = param pair, head_dim = D.
+//     INT4 affine:  apply = val * p0 + p1           (p0=scale, p1=zero)
+//     QJL4 codebook: apply = codebook(val,p0,p1,hd) (p0=mse_norm, p1=qjl_norm)
+//     V2 codebook:   apply = codebook(val,p0,0,hd)  (p0=norm, p1=unused)
 // ---------------------------------------------------------------------------
+
+// Forward declaration of default affine dequantizer
+template<typename T>
+struct AffineDequant;
+
+// Forward declarations of TurboQuant dequantizers (in turbo_quant_codec.h)
+template<typename T>
+struct TurboDequantK;
+template<typename T>
+struct TurboDequantV;
 
 template<class KvQuant, class T>
 struct KvQuantTrait;
@@ -72,6 +88,9 @@ struct KvQuantTrait<KvQuantNone, T> {
     static constexpr int kv_quant = 0;
 
     static constexpr bool kHadamardRotate = false;
+
+    using DequantK = AffineDequant<T>;
+    using DequantV = AffineDequant<T>;
 };
 
 // ---- KvQuantInt8 ----
@@ -95,6 +114,9 @@ struct KvQuantTrait<KvQuantInt8, T> {
     static constexpr int kv_quant = 8;
 
     static constexpr bool kHadamardRotate = false;
+
+    using DequantK = AffineDequant<T>;
+    using DequantV = AffineDequant<T>;
 };
 
 // ---- KvQuantInt4 ----
@@ -118,6 +140,9 @@ struct KvQuantTrait<KvQuantInt4, T> {
     static constexpr int kv_quant = 4;
 
     static constexpr bool kHadamardRotate = false;
+
+    using DequantK = AffineDequant<T>;
+    using DequantV = AffineDequant<T>;
 };
 
 // ---- KvQuantTurbo (TurboQuant: K=4bit QJL4, V=2bit MSE) ----
@@ -137,13 +162,16 @@ struct KvQuantTrait<KvQuantTurbo, T> {
 
     static constexpr bool kQuantKV = true;
 
-    // K: [mse_norm, qjl_norm], V: [norm]
+    // K: [mse_norm, qjl_norm], V: [norm, unused=0]
     static constexpr int kParamCountK = 2;
-    static constexpr int kParamCountV = 1;
+    static constexpr int kParamCountV = 2;
 
     static constexpr int kv_quant = 42;
 
     static constexpr bool kHadamardRotate = true;
+
+    using DequantK = TurboDequantK<T>;
+    using DequantV = TurboDequantV<T>;
 };
 
 // ---------------------------------------------------------------------------
@@ -162,5 +190,17 @@ struct KvQuantFromPolicy {
 
 template<int quant_policy>
 using KvQuantFromPolicy_t = typename KvQuantFromPolicy<quant_policy>::type;
+
+// ---------------------------------------------------------------------------
+// Default affine dequantizer: val * scale + zero
+// ---------------------------------------------------------------------------
+
+template<typename T>
+struct AffineDequant {
+    __device__ static T apply(T val, T scale, T zero, int /*head_dim*/)
+    {
+        return val * scale + zero;
+    }
+};
 
 }  // namespace turbomind::attention

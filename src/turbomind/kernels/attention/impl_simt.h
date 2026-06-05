@@ -13,6 +13,7 @@
 
 #include "src/turbomind/kernels/attention/impl.h"
 #include "src/turbomind/kernels/attention/quantization.h"
+#include "src/turbomind/kernels/attention/turbo_quant_codec.h"
 
 namespace turbomind::attention {
 
@@ -318,8 +319,13 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
         {
             PRAGMA_UNROLL
             for (int k = 0; k < K_K; ++k) {
-                ConvertKvCache<Tkv, Tqk> convert(param_K[n][0], param_K[n][1]);
-                frag_K[n][k] = convert(data_K[n][k]);
+                auto          unpacked = ConvertKvCache<Tkv, Tqk>::convert(data_K[n][k]);
+                constexpr int kLen     = sizeof(unpacked) / sizeof(Tqk);
+                PRAGMA_UNROLL
+                for (int i = 0; i < kLen; ++i) {
+                    unpacked[i] = Trait::DequantK::apply(unpacked[i], param_K[n][0], param_K[n][1], HeadDim);
+                }
+                frag_K[n][k] = unpacked;
             }
         }
     };
@@ -417,8 +423,13 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
         {
             PRAGMA_UNROLL
             for (int n = 0; n < V_N; ++n) {
-                ConvertKvCache<Tkv, Tpv> convert(param_V[k][0], param_V[k][1]);
-                frag_V[k][n] = convert(data_V[k][n]);
+                auto          unpacked = ConvertKvCache<Tkv, Tpv>::convert(data_V[k][n]);
+                constexpr int kLen     = sizeof(unpacked) / sizeof(Tpv);
+                PRAGMA_UNROLL
+                for (int i = 0; i < kLen; ++i) {
+                    unpacked[i] = Trait::DequantV::apply(unpacked[i], param_V[k][0], param_V[k][1], HeadDim);
+                }
+                frag_V[k][n] = unpacked;
             }
         }
     };

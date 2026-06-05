@@ -4,6 +4,7 @@
 
 #include "src/turbomind/kernels/attention/impl.h"
 #include "src/turbomind/kernels/attention/quantization.h"
+#include "src/turbomind/kernels/attention/turbo_quant_codec.h"
 #include "src/turbomind/kernels/core/array_ops.h"
 #include "src/turbomind/kernels/core/layout.h"
 #include "src/turbomind/kernels/core/mma.h"
@@ -345,7 +346,7 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
                         auto& d2 = (Array<T, 2>&)frag_K[k][0][d * 4 + s * 2];
                         PRAGMA_UNROLL
                         for (int i = 0; i < 2; ++i) {
-                            d2[i] = __hfma(d2[i], param_K[0][s][0], param_K[0][s][1]);
+                            d2[i] = Trait::DequantK::apply(d2[i], param_K[0][s][0], param_K[0][s][1], HeadDim);
                         }
                     }
                 }
@@ -470,7 +471,7 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
                         auto& d2 = (Array<T, 2>&)frag_V[m][0][s * 4 + d * 2];
                         PRAGMA_UNROLL
                         for (int i = 0; i < 2; ++i) {
-                            d2[i] = __hfma(d2[i], param_V[0][s][0], param_V[0][s][1]);
+                            d2[i] = Trait::DequantV::apply(d2[i], param_V[0][s][0], param_V[0][s][1], HeadDim);
                         }
                         (uint32_t&)d2 = transpose_m8n8_b16((uint32_t&)d2);
                     }

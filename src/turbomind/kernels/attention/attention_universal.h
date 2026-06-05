@@ -275,43 +275,51 @@ struct AttentionUniversal {
                 }
             }
 
-            Array<Tkv, kVecSize> out_K[1][ITER_C];
-            Array<Tkv, kVecSize> out_V[1][ITER_C];
+            if constexpr (!Trait::kHadamardRotate) {
+                // Standard affine quantization write path
+                Array<Tkv, kVecSize> out_K[1][ITER_C];
+                Array<Tkv, kVecSize> out_V[1][ITER_C];
 
-            ConvertKvCache<T, typename Trait::StorageK> conv_K{param_K[0][0], param_K[0][1]};
-            ConvertKvCache<T, typename Trait::StorageV> conv_V{param_V[0][0], param_V[0][1]};
-            PRAGMA_UNROLL
-            for (int c = 0; c < ITER_C; ++c) {
-                out_K[0][c] = conv_K(vec_K[0][c]);
-                if constexpr (HAS_V) {
-                    out_V[0][c] = conv_V(vec_V[0][c]);
+                ConvertKvCache<T, typename Trait::StorageK> conv_K{param_K[0][0], param_K[0][1]};
+                ConvertKvCache<T, typename Trait::StorageV> conv_V{param_V[0][0], param_V[0][1]};
+                PRAGMA_UNROLL
+                for (int c = 0; c < ITER_C; ++c) {
+                    out_K[0][c] = conv_K(vec_K[0][c]);
+                    if constexpr (HAS_V) {
+                        out_V[0][c] = conv_V(vec_V[0][c]);
+                    }
                 }
-            }
 
-            iterator.block_head_.with(
-                iterator.block_ptrs_, local_ti, [&](auto k_cache, auto v_cache, T* k_param, T* v_param) {
-                    if (local_ti_rank != params.cp_rank) {
-                        return;
-                    }
-                    PRAGMA_UNROLL
-                    for (int c = 0; c < ITER_C; ++c) {
-                        const int di = offset.x + c * Map::kDeltaC;
-                        if (qi < CTA_Q) {
-                            Store(&k_cache[di], out_K[0][c]);
-                            if constexpr (HAS_V) {
-                                Store(&v_cache[di], out_V[0][c]);
+                iterator.block_head_.with(
+                    iterator.block_ptrs_, local_ti, [&](auto k_cache, auto v_cache, T* k_param, T* v_param) {
+                        if (local_ti_rank != params.cp_rank) {
+                            return;
+                        }
+                        PRAGMA_UNROLL
+                        for (int c = 0; c < ITER_C; ++c) {
+                            const int di = offset.x + c * Map::kDeltaC;
+                            if (qi < CTA_Q) {
+                                Store(&k_cache[di], out_K[0][c]);
+                                if constexpr (HAS_V) {
+                                    Store(&v_cache[di], out_V[0][c]);
+                                }
                             }
                         }
-                    }
-                    if constexpr (Trait::kQuantKV) {
-                        if (qi < CTA_Q && offset.x == 0) {
-                            StoreQuantParam<Tkv>(k_param, param_K[0]);
-                            if constexpr (HAS_V) {
-                                StoreQuantParam<Tkv>(v_param, param_V[0]);
+                        if constexpr (Trait::kQuantKV) {
+                            if (qi < CTA_Q && offset.x == 0) {
+                                StoreQuantParam<Tkv>(k_param, param_K[0]);
+                                if constexpr (HAS_V) {
+                                    StoreQuantParam<Tkv>(v_param, param_V[0]);
+                                }
                             }
                         }
-                    }
-                });
+                    });
+            }
+            else {
+                // TurboQuant write path: TODO (Phase 5)
+                // Must implement Hadamard rotation + codebook quantize here.
+                assert(!"TurboQuant ProcessKV write path not yet implemented");
+            }
 
             __syncthreads();
         }

@@ -43,6 +43,8 @@ Registrar reg([](Collector& c) {
     c.add<Decoding_MMA<half, KvQuantInt8, 16, 5>>();
     c.add<Decoding_MMA<half, KvQuantInt4, 8, 5>>();
     c.add<Decoding_MMA<half, KvQuantInt4, 16, 5>>();
+    c.add<Decoding_MMA<half, KvQuantTurbo, 8, 5>>();
+    c.add<Decoding_MMA<half, KvQuantTurbo, 16, 5>>();
 
 #if ENABLE_BF16
     c.add<Decoding_SIMT<nv_bfloat16, 1>>();
@@ -53,6 +55,8 @@ Registrar reg([](Collector& c) {
     c.add<Decoding_MMA<nv_bfloat16, KvQuantInt8, 16, 5>>();
     c.add<Decoding_MMA<nv_bfloat16, KvQuantInt4, 8, 5>>();
     c.add<Decoding_MMA<nv_bfloat16, KvQuantInt4, 16, 5>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantTurbo, 8, 5>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantTurbo, 16, 5>>();
 #endif
 });
 }  // namespace

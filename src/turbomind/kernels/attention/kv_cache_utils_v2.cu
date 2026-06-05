@@ -292,6 +292,11 @@ void invokeProcessKV_v2(char**                 blocks,
     else if (quant_policy & QuantPolicy::kCacheKVInt4) {
         dispatch(attention::KvQuantInt4{});
     }
+    // TODO: TurboQuant write path (ProcessKV) needs Hadamard + codebook quantize,
+    // cannot use the standard ConvertKvCache affine path.
+    // else if (quant_policy == 42) {
+    //     dispatch(attention::KvQuantTurbo{});
+    // }
     else {
         dispatch(attention::KvQuantNone{});
     }
@@ -546,6 +551,10 @@ void invokeFlattenKV_v2(T*                     k,
     else if (quant_policy & QuantPolicy::kCacheKVInt4) {
         dispatch(attention::KvQuantInt4{});
     }
+    // TODO: TurboQuant FlattenKV read path — same as ProcessKV, needs codebook dequant
+    // else if (quant_policy == 42) {
+    //     dispatch(attention::KvQuantTurbo{});
+    // }
     else {
         dispatch(attention::KvQuantNone{});
     }

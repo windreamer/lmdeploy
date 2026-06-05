@@ -885,4 +885,74 @@ inline __device__ void StoreQuantParam<uint4_t, half>(half* dst, Array<half, 2> 
     Store(dst, src);
 }
 
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// TurboQuant: uint2_t ConvertKvCache specializations
+//
+// Read path (uint2_t → T): converts 2-bit index to integer half/float [0..3],
+//   actual codebook dequantization is done by Trait::DequantV::apply().
+// Write path (T → uint2_t): assert stub — TurboQuant write path must use
+//   Hadamard + codebook quantize, not ConvertKvCache (Phase 5).
+//////////////////////////////////////////////////////////////////////////////////////////////////
+
+// half → uint2_t: write-path assert stub
+template<>
+struct ConvertKvCache<half, uint2_t> {
+    half scale_;
+    half zero_;
+
+    __device__ ConvertKvCache(half scale, half zero): scale_{scale}, zero_{zero} {}
+
+    template<int N>
+    __device__ auto operator()(const Array<half, N>& vi) const -> Array<uint2_t, N>
+    {
+        assert(!"ConvertKvCache<half,uint2_t> not implemented for TurboQuant write path");
+        return {};
+    }
+};
+
+// uint2_t → half: bit unpack to integer half
+template<>
+struct ConvertKvCache<uint2_t, half> {
+    half scale_;
+    half zero_;
+
+    __device__ ConvertKvCache(half scale, half zero): scale_{scale}, zero_{zero} {}
+
+    template<int N>
+    __device__ static auto convert(const Array<uint2_t, N>& vi)
+    {
+        Array<half, N> vo;
+        PRAGMA_UNROLL
+        for (int i = 0; i < N; ++i) {
+            vo[i] = __int2half_rn((int)vi[i]);
+        }
+        return vo;
+    }
+
+    template<int N>
+    __device__ auto operator()(const Array<uint2_t, N>& vi) const -> Array<half, N>
+    {
+        auto vo = convert(vi);
+        PRAGMA_UNROLL
+        for (int i = 0; i < N; ++i) {
+            vo[i] = vo[i] * scale_ + zero_;
+        }
+        return vo;
+    }
+};
+
+// uint2_t -> float: delegate to half then cast
+template<>
+struct ConvertKvCache<uint2_t, float> {
+    ConvertKvCache<uint2_t, half> impl_;
+
+    __device__ ConvertKvCache(float scale, float zero): impl_{scale, zero} {}
+
+    template<int N>
+    __device__ auto operator()(const Array<uint2_t, N>& vi) const
+    {
+        return cast<float>(impl_(vi));
+    }
+};
+
 }  // namespace turbomind
