@@ -602,39 +602,167 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
 
     int local_ti, local_ti_rank;
 
-    PRAGMA_UNROLL
-    for (int s = 0; s < ITER_S; ++s) {
-        const int si = offset.y + s * Map::kDeltaS + token_idx;
-        local_ti     = cp_size.divmod(local_ti_rank, si);
-        if (si < seq_len && local_ti_rank == cp_rank) {
-            block_head.with((char**)blocks, local_ti, [&](auto k_cache, auto v_cache, T* k_param, T* v_param) {
-                PRAGMA_UNROLL
-                for (int c = 0; c < ITER_C; ++c) {
-                    int di = offset.x + c * Map::kDeltaC;
-                    Ldg(vec_K[s][c], &k_cache[di]);
-                    if constexpr (HAS_V) {
-                        Ldg(vec_V[s][c], &v_cache[di]);
-                    }
-                }
-                if constexpr (kQuantKV) {
+    // TurboQuant read path: complete dequantize + inv Hadamard inline, then return
+    if constexpr (Trait::kHadamardRotate) {
+        const float sigma = 1.f / sqrtf((float)HeadDim);
+        const float had_scale = 1.0f / sqrtf((float)HeadDim);
+        const int kShuffleStages = (HeadDim >= 256) ? 5 : (HeadDim >= 128) ? 4 : 3;
+
+        PRAGMA_UNROLL
+        for (int s = 0; s < ITER_S; ++s) {
+            const int si = offset.y + s * Map::kDeltaS + token_idx;
+            local_ti     = cp_size.divmod(local_ti_rank, si);
+            if (si < seq_len && local_ti_rank == cp_rank) {
+                block_head.with((char**)blocks, local_ti, [&](auto k_cache, auto v_cache, T* k_param, T* v_param) {
+                    // Read params
                     Ldg(param_K[s], k_param);
                     if constexpr (HAS_V) {
                         Ldg(param_V[s], v_param);
                     }
+                    float mse_norm = (float)param_K[s][0];
+                    float qjl_norm = (float)param_K[s][1];
+                    float v_norm   = (float)param_V[s][0];
+
+                    PRAGMA_UNROLL
+                    for (int c = 0; c < ITER_C; ++c) {
+                        int di = offset.x + c * Map::kDeltaC;
+                        // Read K packed data (uint32_t underlying Array<uint4_t,8>)
+                        uint32_t packed_k;
+                        Ldg(reinterpret_cast<Array<uint4_t, kVecSize>&>(packed_k), &k_cache[di]);
+                        // Dequantize K: QJL4 → rotated domain
+                        PRAGMA_UNROLL
+                        for (int j = 0; j < kVecSize; ++j) {
+                            uint8_t nibble = (packed_k >> (j * 4)) & 0xF;
+                            int idx3     = nibble & 0x7;
+                            int sign_bit = (nibble >> 3) & 0x1;
+                            float centroid = attention::dequantize_k4_mse(idx3, sigma);
+                            float sign_val = sign_bit * 2.f - 1.f;
+                            out_K[s][c][j] = (T)(mse_norm * (centroid + qjl_norm * sign_val));
+                        }
+                        // Read + dequantize V: 2-bit
+                        if constexpr (HAS_V) {
+                            uint16_t packed_v;
+                            Ldg(reinterpret_cast<Array<uint2_t, kVecSize>&>(packed_v), &v_cache[di]);
+                            PRAGMA_UNROLL
+                            for (int j = 0; j < kVecSize; ++j) {
+                                int idx2 = (packed_v >> (j * 2)) & 0x3;
+                                float centroid = attention::dequantize_v2(idx2, sigma);
+                                out_V[s][c][j] = (T)(v_norm * centroid);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        // Inverse Hadamard on dequantized K/V
+        PRAGMA_UNROLL
+        for (int s = 0; s < ITER_S; ++s) {
+            PRAGMA_UNROLL
+            for (int c = 0; c < ITER_C; ++c) {
+                // K
+                Array<float, kVecSize> fval_k;
+                PRAGMA_UNROLL
+                for (int j = 0; j < kVecSize; ++j) {
+                    fval_k[j] = (float)out_K[s][c][j];
                 }
-            });
+                PRAGMA_UNROLL
+                for (int stg = 0; stg < 3; ++stg) {
+                    const int stride = 1 << stg;
+                    PRAGMA_UNROLL
+                    for (int j = 0; j < kVecSize; ++j) {
+                        if (j & stride) {
+                            float a = fval_k[j - stride], b = fval_k[j];
+                            fval_k[j - stride] = a + b;
+                            fval_k[j]          = a - b;
+                        }
+                    }
+                }
+                PRAGMA_UNROLL
+                for (int stg = 0; stg < kShuffleStages; ++stg) {
+                    const int mask = 1 << stg;
+                    const float sign = (lane_id & mask) ? -1.f : 1.f;
+                    PRAGMA_UNROLL
+                    for (int j = 0; j < kVecSize; ++j) {
+                        float other = __shfl_xor_sync(uint32_t(-1), fval_k[j], mask);
+                        fval_k[j] = sign * fval_k[j] + other;
+                    }
+                }
+                PRAGMA_UNROLL
+                for (int j = 0; j < kVecSize; ++j) {
+                    out_K[s][c][j] = (T)(fval_k[j] * had_scale);
+                }
+                // V
+                if constexpr (HAS_V) {
+                    Array<float, kVecSize> fval_v;
+                    PRAGMA_UNROLL
+                    for (int j = 0; j < kVecSize; ++j) {
+                        fval_v[j] = (float)out_V[s][c][j];
+                    }
+                    PRAGMA_UNROLL
+                    for (int stg = 0; stg < 3; ++stg) {
+                        const int stride = 1 << stg;
+                        PRAGMA_UNROLL
+                        for (int j = 0; j < kVecSize; ++j) {
+                            if (j & stride) {
+                                float a = fval_v[j - stride], b = fval_v[j];
+                                fval_v[j - stride] = a + b;
+                                fval_v[j]          = a - b;
+                            }
+                        }
+                    }
+                    PRAGMA_UNROLL
+                    for (int stg = 0; stg < kShuffleStages; ++stg) {
+                        const int mask = 1 << stg;
+                        const float sign = (lane_id & mask) ? -1.f : 1.f;
+                        PRAGMA_UNROLL
+                        for (int j = 0; j < kVecSize; ++j) {
+                            float other = __shfl_xor_sync(uint32_t(-1), fval_v[j], mask);
+                            fval_v[j] = sign * fval_v[j] + other;
+                        }
+                    }
+                    PRAGMA_UNROLL
+                    for (int j = 0; j < kVecSize; ++j) {
+                        out_V[s][c][j] = (T)(fval_v[j] * had_scale);
+                    }
+                }
+            }
         }
     }
-
-    PRAGMA_UNROLL
-    for (int s = 0; s < ITER_S; ++s) {
-        ConvertKvCache<typename Trait::StorageK, T> conv_K{param_K[s][0], param_K[s][1]};
-        ConvertKvCache<typename Trait::StorageV, T> conv_V{param_V[s][0], param_V[s][1]};
+    else {
+        // Standard read + affine dequantization (original path)
         PRAGMA_UNROLL
-        for (int c = 0; c < ITER_C; ++c) {
-            out_K[s][c] = conv_K(vec_K[s][c]);
-            if constexpr (HAS_V) {
-                out_V[s][c] = conv_V(vec_V[s][c]);
+        for (int s = 0; s < ITER_S; ++s) {
+            const int si = offset.y + s * Map::kDeltaS + token_idx;
+            local_ti     = cp_size.divmod(local_ti_rank, si);
+            if (si < seq_len && local_ti_rank == cp_rank) {
+                block_head.with((char**)blocks, local_ti, [&](auto k_cache, auto v_cache, T* k_param, T* v_param) {
+                    PRAGMA_UNROLL
+                    for (int c = 0; c < ITER_C; ++c) {
+                        int di = offset.x + c * Map::kDeltaC;
+                        Ldg(vec_K[s][c], &k_cache[di]);
+                        if constexpr (HAS_V) {
+                            Ldg(vec_V[s][c], &v_cache[di]);
+                        }
+                    }
+                    if constexpr (kQuantKV) {
+                        Ldg(param_K[s], k_param);
+                        if constexpr (HAS_V) {
+                            Ldg(param_V[s], v_param);
+                        }
+                    }
+                });
+            }
+        }
+        PRAGMA_UNROLL
+        for (int s = 0; s < ITER_S; ++s) {
+            ConvertKvCache<typename Trait::StorageK, T> conv_K{param_K[s][0], param_K[s][1]};
+            ConvertKvCache<typename Trait::StorageV, T> conv_V{param_V[s][0], param_V[s][1]};
+            PRAGMA_UNROLL
+            for (int c = 0; c < ITER_C; ++c) {
+                out_K[s][c] = conv_K(vec_K[s][c]);
+                if constexpr (HAS_V) {
+                    out_V[s][c] = conv_V(vec_V[s][c]);
+                }
             }
         }
     }
@@ -755,10 +883,9 @@ void invokeFlattenKV_v2(T*                     k,
     else if (quant_policy & QuantPolicy::kCacheKVInt4) {
         dispatch(attention::KvQuantInt4{});
     }
-    // TODO: TurboQuant FlattenKV read path — same as ProcessKV, needs codebook dequant
-    // else if (quant_policy == 42) {
-    //     dispatch(attention::KvQuantTurbo{});
-    // }
+    else if (quant_policy == 42) {
+        dispatch(attention::KvQuantTurbo{});
+    }
     else {
         dispatch(attention::KvQuantNone{});
     }
