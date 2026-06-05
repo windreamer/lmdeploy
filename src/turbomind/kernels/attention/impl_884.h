@@ -13,10 +13,13 @@
 
 namespace turbomind::attention {
 
-template<class T_, int CTA_H_, int CTA_Q_, int CTA_S_, int WARP_H_, int WARP_Q, int WARP_S, int HeadDim>
-struct Impl<MMA_884, T_, T_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S, HeadDim> {
-    using T   = T_;
-    using Tkv = T_;
+template<class T_, class KvQuant_, int CTA_H_, int CTA_Q_, int CTA_S_, int WARP_H_, int WARP_Q, int WARP_S, int HeadDim>
+struct Impl<MMA_884, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S, HeadDim> {
+    static_assert(std::is_same_v<KvQuant_, KvQuantNone>, "MMA_884 does not support quantized KV cache");
+
+    using T       = T_;
+    using KvQuant = KvQuant_;
+    using Tkv     = T_;  // no quantization
 
     static constexpr bool MLA = false;
 

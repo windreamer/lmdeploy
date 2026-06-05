@@ -5,6 +5,7 @@
 #include <limits>
 #include <type_traits>
 
+#include "kv_quant_trait.h"
 #include "quantization.h"
 
 #include "src/turbomind/kernels/attention/rotary_embedding.h"
@@ -23,8 +24,10 @@ struct DecodingCtaMap;
 template<class Arch_, class Mainloop, class CacheIteratorFactory_, class CtaMap_>
 struct AttentionUniversal {
 
-    using T   = typename Mainloop::T;
-    using Tkv = typename Mainloop::Tkv;
+    using T       = typename Mainloop::T;
+    using Tkv     = typename Mainloop::Tkv;
+    using KvQuant = typename Mainloop::KvQuant;
+    using Trait   = attention::KvQuantTrait<KvQuant, T>;
 
     using Impl = typename Mainloop::Impl;
 
@@ -265,18 +268,18 @@ struct AttentionUniversal {
             Array<T, 2> param_K[1];
             Array<T, 2> param_V[1];
 
-            if constexpr (!std::is_same_v<T, Tkv>) {
-                warp_stats<Map::kWarpThreadC>(param_K, vec_K, bitsof<Tkv>);
+            if constexpr (Trait::kQuantKV) {
+                warp_stats<Map::kWarpThreadC>(param_K, vec_K, Trait::kBitsK);
                 if constexpr (HAS_V) {
-                    warp_stats<Map::kWarpThreadC>(param_V, vec_V, bitsof<Tkv>);
+                    warp_stats<Map::kWarpThreadC>(param_V, vec_V, Trait::kBitsV);
                 }
             }
 
             Array<Tkv, kVecSize> out_K[1][ITER_C];
             Array<Tkv, kVecSize> out_V[1][ITER_C];
 
-            ConvertKvCache<T, Tkv> conv_K{param_K[0][0], param_K[0][1]};
-            ConvertKvCache<T, Tkv> conv_V{param_V[0][0], param_V[0][1]};
+            ConvertKvCache<T, typename Trait::StorageK> conv_K{param_K[0][0], param_K[0][1]};
+            ConvertKvCache<T, typename Trait::StorageV> conv_V{param_V[0][0], param_V[0][1]};
             PRAGMA_UNROLL
             for (int c = 0; c < ITER_C; ++c) {
                 out_K[0][c] = conv_K(vec_K[0][c]);
@@ -300,7 +303,7 @@ struct AttentionUniversal {
                             }
                         }
                     }
-                    if constexpr (!std::is_same_v<T, Tkv>) {
+                    if constexpr (Trait::kQuantKV) {
                         if (qi < CTA_Q && offset.x == 0) {
                             StoreQuantParam<Tkv>(k_param, param_K[0]);
                             if constexpr (HAS_V) {

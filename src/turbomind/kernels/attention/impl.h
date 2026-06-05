@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "src/turbomind/kernels/attention/kv_quant_trait.h"
+
 namespace turbomind {
 
 namespace attention {
@@ -23,7 +25,7 @@ struct MMA_SIMT {
 
 template<class Tag,
          class T,
-         class Tkv,
+         class KvQuant,
          int CTA_H,
          int CTA_Q,
          int CTA_S,

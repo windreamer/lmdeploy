@@ -14,20 +14,6 @@
 
 namespace turbomind::attention {
 
-template<class Tkv>
-constexpr int kv_quant_from_type()
-{
-    if constexpr (std::is_same_v<Tkv, uint8_t>) {
-        return 8;
-    }
-    else if constexpr (std::is_same_v<Tkv, uint4_t>) {
-        return 4;
-    }
-    else {
-        return 0;
-    }
-}
-
 template<class K>
 class KernelImpl: public Kernel {
     static constexpr bool kIsDecoding = std::is_same_v<typename K::CtaMap, DecodingCtaMap>;
@@ -41,7 +27,7 @@ public:
         desc_.data_type = data_type_v<typename K::T>;
 
         if constexpr (kIsDecoding) {
-            desc_.kv_quant = kv_quant_from_type<typename K::Tkv>();
+            desc_.kv_quant = KvQuantTrait<typename K::KvQuant, typename K::T>::kv_quant;
             desc_.qh       = K::CTA_H;
         }
         else {

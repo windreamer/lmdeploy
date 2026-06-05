@@ -60,7 +60,7 @@ struct BlockIterator {
     }
 };
 
-template<class T, class Tkv, class BlockLayout_, int CTA_S>
+template<class T, class KvQuant, class BlockLayout_, int CTA_S>
 struct BlockIteratorFactory {
     using BlockLayout = BlockLayout_;
 
@@ -71,11 +71,11 @@ struct BlockIteratorFactory {
 
     __device__ auto Create(int batch_idx, int head_idx)
     {
-        block::Head<T, Tkv, BlockLayout> head{block_layout_, layer_idx_, head_idx};
+        block::Head<T, KvQuant, BlockLayout> head{block_layout_, layer_idx_, head_idx};
 
         char** block_ptrs = block_ptrs_ + cu_block_nums_[batch_idx];
 
-        return BlockIterator<block::Head<T, Tkv, BlockLayout>, CTA_S>{head, block_ptrs};
+        return BlockIterator<block::Head<T, KvQuant, BlockLayout>, CTA_S>{head, block_ptrs};
     }
 };
 
@@ -96,8 +96,8 @@ struct CreateCacheIterFactory<CacheIterFactory, std::void_t<typename CacheIterFa
     }
 };
 
-template<class T, class Tkv, int CTA_S, int HeadDim>
+template<class T, class KvQuant, int CTA_S, int HeadDim>
 using GetBlockIterFactory =
-    BlockIteratorFactory<T, Tkv, block::Layout<block::Config<T, Tkv, HeadDim, HeadDim == 576>>, CTA_S>;
+    BlockIteratorFactory<T, KvQuant, block::Layout<block::Config<T, KvQuant, HeadDim, HeadDim == 576>>, CTA_S>;
 
 }  // namespace turbomind

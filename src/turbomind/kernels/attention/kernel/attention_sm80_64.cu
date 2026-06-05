@@ -21,7 +21,8 @@ constexpr int kStages  = 2;
 template<class T>
 using KT = AttentionUniversal<
     arch::Sm80,
-    Mainloop<Sm80_CpAsync<kStages>, Impl<MMA_16816, T, T, 1, kCTA_Q, kCTA_S, 1, kWARP_Q, kCTA_S, kHeadDim, kStages>>,
+    Mainloop<Sm80_CpAsync<kStages>,
+             Impl<MMA_16816, T, KvQuantNone, 1, kCTA_Q, kCTA_S, 1, kWARP_Q, kCTA_S, kHeadDim, kStages>>,
     LinearIteratorFactory<T, kCTA_S, kHeadDim>,
     AttentionCtaMap>;
 

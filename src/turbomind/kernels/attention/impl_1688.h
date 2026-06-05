@@ -11,9 +11,11 @@
 
 namespace turbomind::attention {
 
-template<class T_, int CTA_H_, int CTA_Q_, int CTA_S_, int WARP_H, int WARP_Q, int WARP_S, int HeadDim>
-struct Impl<MMA_1688, T_, T_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP_S, HeadDim, 2>:
+template<class T_, class KvQuant_, int CTA_H_, int CTA_Q_, int CTA_S_, int WARP_H, int WARP_Q, int WARP_S, int HeadDim>
+struct Impl<MMA_1688, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP_S, HeadDim, 2>:
     Impl_m16k8<T_, WARP_H, WARP_Q, WARP_S, HeadDim> {
+
+    static_assert(std::is_same_v<KvQuant_, KvQuantNone>, "MMA_1688 does not support quantized KV cache");
 
     using Base = Impl_m16k8<T_, WARP_H, WARP_Q, WARP_S, HeadDim>;
 
@@ -36,8 +38,9 @@ struct Impl<MMA_1688, T_, T_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP_S, He
     using Base::ConvertStoP;
     using Base::StoreO;
 
-    using T   = T_;
-    using Tkv = T_;
+    using T       = T_;
+    using KvQuant = KvQuant_;
+    using Tkv     = T_;  // no quantization
 
     static constexpr int kHeadDim = HeadDim;
 

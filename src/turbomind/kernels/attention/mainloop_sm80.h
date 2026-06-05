@@ -19,8 +19,10 @@ struct Mainloop<Sm80_CpAsync<Stages>, Impl_> {
 
     using Impl = Impl_;
 
-    using T   = typename Impl::T;
-    using Tkv = typename Impl::Tkv;
+    using T       = typename Impl::T;
+    using Tkv     = typename Impl::Tkv;
+    using KvQuant = typename Impl::KvQuant;
+    using Trait   = KvQuantTrait<KvQuant, T>;
 
     static constexpr std::false_type false_c{};
     static constexpr std::true_type  true_c{};
@@ -38,8 +40,8 @@ struct Mainloop<Sm80_CpAsync<Stages>, Impl_> {
     using CombinedIterV =
         CombinedIterator<GmemIterV_, Sm80GmemIterator<T, typename Impl::ThreadMapKVp, typename Impl::SmemLayoutKVp, 3>>;
 
-    using GmemIterK = std::conditional_t<std::is_same_v<T, Tkv>, GmemIterK_, CombinedIterK>;
-    using GmemIterV = std::conditional_t<std::is_same_v<T, Tkv>, GmemIterV_, CombinedIterV>;
+    using GmemIterK = std::conditional_t<Trait::kQuantKV, CombinedIterK, GmemIterK_>;
+    using GmemIterV = std::conditional_t<Trait::kQuantKV, CombinedIterV, GmemIterV_>;
 
     using FragQ = typename Impl::FragQ;
     using FragS = typename Impl::FragS;

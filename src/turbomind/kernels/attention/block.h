@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "src/turbomind/kernels/attention/kv_quant_trait.h"
 #include "src/turbomind/kernels/core/common.h"
 #include "src/turbomind/kernels/core/data_type.h"
 #include "src/turbomind/kernels/core/sub_byte_ptr.h"
@@ -12,24 +13,26 @@ namespace turbomind {
 
 namespace block {
 
-template<class T, class Tkv, int HeadDim, bool ShareKV = false>
+template<class T, class KvQuant, int HeadDim, bool ShareKV = false>
 struct Config {
+    using Trait = attention::KvQuantTrait<KvQuant, T>;
+
     int head_num_;
     int block_len_;
 
     TM_HOST_DEVICE constexpr int t_bits() const
     {
-        if constexpr (std::is_same_v<T, Tkv>) {
-            return 0;
+        if constexpr (Trait::kQuantKV) {
+            return bitsof<T>;
         }
         else {
-            return bitsof<T>;
+            return 0;
         }
     }
 
     TM_HOST_DEVICE constexpr int q_bits() const
     {
-        return bitsof<Tkv>;
+        return Trait::kBitsK;
     }
 
     TM_HOST_DEVICE constexpr int head_dim() const
@@ -55,9 +58,12 @@ struct Config {
 
 // Layout -> LayerId -> HeadId -> Timestep -> [Block] -> (k_data, v_data, k_param, v_param)
 
-template<class T, class Tkv, class Layout>
+template<class T, class KvQuant, class Layout>
 class Head {
 public:
+    using Trait = attention::KvQuantTrait<KvQuant, T>;
+    using Tkv   = typename Trait::StorageK;
+
     TM_HOST_DEVICE Head(Layout layout, int layer_id, int head_id):
         layout_{layout}, layer_id_{layer_id}, head_id_{head_id}
     {
@@ -65,7 +71,7 @@ public:
 
     TM_HOST_DEVICE auto k_data(char* block, int ti) const
     {
-        if constexpr (std::is_same_v<Tkv, uint4_t>) {
+        if constexpr (Trait::kBitsK < 8) {
             return SubBytePtr<Tkv>{block + layout_.k_data(layer_id_, head_id_, ti)};
         }
         else {
@@ -75,11 +81,11 @@ public:
 
     TM_HOST_DEVICE auto v_data(char* block, int ti) const
     {
-        if constexpr (std::is_same_v<Tkv, uint4_t>) {
-            return SubBytePtr<Tkv>{block + layout_.v_data(layer_id_, head_id_, ti)};
+        if constexpr (Trait::kBitsV < 8) {
+            return SubBytePtr<typename Trait::StorageV>{block + layout_.v_data(layer_id_, head_id_, ti)};
         }
         else {
-            return reinterpret_cast<Tkv*>(block + layout_.v_data(layer_id_, head_id_, ti));
+            return reinterpret_cast<typename Trait::StorageV*>(block + layout_.v_data(layer_id_, head_id_, ti));
         }
     }
 

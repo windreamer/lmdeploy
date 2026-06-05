@@ -14,7 +14,7 @@
 namespace turbomind::attention {
 
 template<class T_,
-         class Tkv_,
+         class KvQuant_,
          int CTA_H_,
          int CTA_Q_,
          int CTA_S_,
@@ -23,11 +23,14 @@ template<class T_,
          int WARP_S,
          int HeadDim,
          int Stages>
-struct Impl<MMA_81616, T_, Tkv_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S, HeadDim, Stages> {
-    using T   = T_;
-    using Tkv = Tkv_;
+struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S, HeadDim, Stages> {
+    using T       = T_;
+    using KvQuant = KvQuant_;
+    using Trait   = KvQuantTrait<KvQuant, T>;
 
-    static constexpr int kQuantKV = !std::is_same_v<T, Tkv>;
+    using Tkv = typename Trait::StorageK;  // backward compat: most code uses Tkv
+
+    static constexpr int kQuantKV = Trait::kQuantKV;
 
     static constexpr bool MLA = HeadDim == 576;
 
@@ -74,7 +77,7 @@ struct Impl<MMA_81616, T_, Tkv_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S
     using FragM = Array<float, 2>[K_N];       // (_8,q4)    (Qn)    (q2)
                                               //      2       8       1
 
-    static constexpr int X = 16 / bitsof<Tkv>;
+    static constexpr int X = 16 / Trait::kBitsK;
 
     using DataK = Array<Tkv, 8 * X>[K_K / X][K_M];  // {s8,d4} [Dk/x,Sm] (d2,s2,dx,d2)
                                                     //   1 2x    16x 16   8x  8  2  1
@@ -112,12 +115,12 @@ struct Impl<MMA_81616, T_, Tkv_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S
     }
 
     using SmemLayoutQ = SmemLayoutV2<CTA_H1, HeadDim, CTA_H1, HeadDim, Swizzle<3, 3, 4>>;
-    using SmemLayoutK = decltype(_SmemLayoutKV(bitsof<Tkv>));
-    using SmemLayoutV = decltype(_SmemLayoutKV(bitsof<Tkv>));
+    using SmemLayoutK = decltype(_SmemLayoutKV(std::integral_constant<int, Trait::kBitsK>{}));
+    using SmemLayoutV = decltype(_SmemLayoutKV(std::integral_constant<int, Trait::kBitsK>{}));
 
     using SmemLayoutKVp = SmemLayoutV2<CTA_S, 2, CTA_S, 2, Identity>;
 
-    using PointerKV = get_pointer_type<Tkv>;
+    using PointerKV = typename Trait::PointerK;
 
     union SharedStorage {
         __align__(16) T Q[SmemLayoutQ::kSize];
@@ -137,7 +140,7 @@ struct Impl<MMA_81616, T_, Tkv_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S
     };
 
     using ThreadMapQ  = RakedThreadMap<HeadDim, CTA_H1, 8, kWarpCount>;
-    using ThreadMapKV = RakedThreadMap<HeadDim, CTA_S, 128 / bitsof<Tkv>, kWarpCount>;
+    using ThreadMapKV = RakedThreadMap<HeadDim, CTA_S, 128 / Trait::kBitsK, kWarpCount>;
     // `WARP_SIZE / WARP_S` is chosen to achieve minimum kIterS w/o introducing partial S iter
     using ThreadMapKVp = RakedThreadMap<2, CTA_S, 2, kWarpCount, WARP_SIZE / WARP_S>;
 
