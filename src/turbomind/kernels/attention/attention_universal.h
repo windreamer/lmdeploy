@@ -7,6 +7,8 @@
 
 #include "kv_quant_trait.h"
 #include "quantization.h"
+#include "turbo_quant_qjl4.h"
+#include "turbo_quant_v2.h"
 
 #include "src/turbomind/kernels/attention/rotary_embedding.h"
 #include "src/turbomind/kernels/core/array_ops.h"
@@ -395,9 +397,123 @@ struct AttentionUniversal {
                     });
             }
             else {
-                // TurboQuant write path: TODO (Phase 5)
-                // Must implement Hadamard rotation + codebook quantize here.
-                assert(!"TurboQuant ProcessKV write path not yet implemented");
+                // TurboQuant write path: Hadamard rotate + codebook quantize
+                // 1. Hadamard rotate K/V
+                PRAGMA_UNROLL
+                for (int c = 0; c < ITER_C; ++c) {
+                    hadamard_register_butterfly<T, kVecSize, kHeadDim>(vec_K[0][c]);
+                    if constexpr (HAS_V) {
+                        hadamard_register_butterfly<T, kVecSize, kHeadDim>(vec_V[0][c]);
+                    }
+                }
+
+                // 2. Compute L2 norms of rotated K/V (warp-level sum-of-squares + sqrt)
+                float sum_k_sq = 0.f;
+                float sum_v_sq = 0.f;
+                PRAGMA_UNROLL
+                for (int c = 0; c < ITER_C; ++c) {
+                    PRAGMA_UNROLL
+                    for (int j = 0; j < kVecSize; ++j) {
+                        float kv = (float)vec_K[0][c][j];
+                        sum_k_sq += kv * kv;
+                        if constexpr (HAS_V) {
+                            float vv = (float)vec_V[0][c][j];
+                            sum_v_sq += vv * vv;
+                        }
+                    }
+                }
+                // Warp reduce sum of squares
+                PRAGMA_UNROLL
+                for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+                    sum_k_sq += __shfl_xor_sync(uint32_t(-1), sum_k_sq, mask);
+                    sum_v_sq += __shfl_xor_sync(uint32_t(-1), sum_v_sq, mask);
+                }
+                const float mse_norm = sqrtf(sum_k_sq);
+                const float v_norm   = sqrtf(sum_v_sq);
+                const float inv_mse_norm = (mse_norm > 0.f) ? 1.f / mse_norm : 0.f;
+                const float inv_v_norm   = (v_norm > 0.f) ? 1.f / v_norm : 0.f;
+
+                // 3. Normalize + 3-bit MSE quantize K + compute residual
+                const float sigma_k = 1.f / sqrtf((float)kHeadDim);
+                const float sigma_v = sigma_k;
+                float residual_sq_sum = 0.f;
+
+                // Quantize K: QJL4 = 3-bit MSE index + 1-bit QJL sign, packed as 4-bit nibble
+                // Pack 8 nibbles into a uint32_t (same layout as ConvertKvCache<uint4_t>::pack)
+                Array<uint4_t, kVecSize> out_K[ITER_C];
+                PRAGMA_UNROLL
+                for (int c = 0; c < ITER_C; ++c) {
+                    uint8_t nibbles[kVecSize];
+                    PRAGMA_UNROLL
+                    for (int j = 0; j < kVecSize; ++j) {
+                        float y = (float)vec_K[0][c][j] * inv_mse_norm;
+                        int   idx3 = attention::quantize_k4_mse(y, sigma_k);
+                        float centroid = attention::dequantize_k4_mse(idx3, sigma_k);
+                        float residual = y - centroid;
+                        int   sign_bit = (residual >= 0.f) ? 1 : 0;
+                        residual_sq_sum += residual * residual;
+                        nibbles[j] = (uint8_t)(idx3 | (sign_bit << 3));
+                    }
+                    // Pack 8 nibbles into uint32_t (4 bytes), matching SubBytePtr<uint4_t> layout
+                    uint32_t packed = 0;
+                    PRAGMA_UNROLL
+                    for (int j = 0; j < kVecSize; ++j) {
+                        packed |= ((uint32_t)nibbles[j] << (j * 4));
+                    }
+                    out_K[c] = (Array<uint4_t, kVecSize>&)packed;
+                }
+
+                // QJL norm: sqrt(sum_residual^2 / d), warp-reduced
+                PRAGMA_UNROLL
+                for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+                    residual_sq_sum += __shfl_xor_sync(uint32_t(-1), residual_sq_sum, mask);
+                }
+                const float qjl_norm = sqrtf(residual_sq_sum / (float)kHeadDim);
+
+                // 4. Quantize V: 2-bit MSE, pack 8 indices into uint16_t
+                Array<uint2_t, kVecSize> out_V[ITER_C];
+                if constexpr (HAS_V) {
+                    PRAGMA_UNROLL
+                    for (int c = 0; c < ITER_C; ++c) {
+                        uint16_t packed_v = 0;
+                        PRAGMA_UNROLL
+                        for (int j = 0; j < kVecSize; ++j) {
+                            float u   = (float)vec_V[0][c][j] * inv_v_norm;
+                            int   idx2 = attention::quantize_v2(u, sigma_v);
+                            packed_v |= ((uint16_t)idx2 << (j * 2));
+                        }
+                        out_V[c] = (Array<uint2_t, kVecSize>&)packed_v;
+                    }
+                }
+
+                // 5. Store packed data + norm params
+                param_K[0][0] = (T)mse_norm;
+                param_K[0][1] = (T)qjl_norm;
+                param_V[0][0] = (T)v_norm;
+                param_V[0][1] = (T)0;  // unused (kParamCountV=2, Option A)
+
+                iterator.block_head_.with(
+                    iterator.block_ptrs_, local_ti, [&](auto k_cache, auto v_cache, T* k_param, T* v_param) {
+                        if (local_ti_rank != params.cp_rank) {
+                            return;
+                        }
+                        PRAGMA_UNROLL
+                        for (int c = 0; c < ITER_C; ++c) {
+                            const int di = offset.x + c * Map::kDeltaC;
+                            if (qi < CTA_Q) {
+                                Store(&k_cache[di], out_K[c]);
+                                if constexpr (HAS_V) {
+                                    Store(&v_cache[di], out_V[c]);
+                                }
+                            }
+                        }
+                        if (qi < CTA_Q && offset.x == 0) {
+                            StoreQuantParam<Tkv>(k_param, param_K[0]);
+                            if constexpr (HAS_V) {
+                                StoreQuantParam<Tkv>(v_param, param_V[0]);
+                            }
+                        }
+                    });
             }
 
             __syncthreads();
