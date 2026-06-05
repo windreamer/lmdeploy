@@ -17,6 +17,72 @@
 
 namespace turbomind {
 
+// ---------------------------------------------------------------------------
+// Fused Hadamard butterfly in registers + warp shuffles
+// ---------------------------------------------------------------------------
+// Each thread holds Array<T, kAccessC> covering kAccessC consecutive elements
+// along the head dimension. A warp's kWarpThreadC threads cover the full HeadDim.
+//
+// Butterfly stages:
+//   log2(kAccessC) local stages: pairs within the same kAccessC chunk (register-only)
+//   log2(HeadDim/kAccessC) shuffle stages: pairs across threads via __shfl_xor
+//
+// H is orthogonal: Q = H/sqrt(d), Q^{-1} = Q^T = Q (same transform for forward/inverse).
+// ---------------------------------------------------------------------------
+
+template<typename T, int kAccessC, int HeadDim>
+__device__ void hadamard_register_butterfly(Array<T, kAccessC>& val)
+{
+    constexpr int kLocalStages  = (kAccessC >= 8) ? 3 : (kAccessC >= 4) ? 2 : 1;
+    constexpr int kTotalStages  = /* log2(HeadDim) */
+        (HeadDim >= 256) ? 8 : (HeadDim >= 128) ? 7 : (HeadDim >= 64) ? 6 : (HeadDim >= 32) ? 5 : 4;
+    constexpr int kShuffleStages = kTotalStages - kLocalStages;
+
+    // Convert to float for numerical accuracy (matches standalone Hadamard kernel)
+    Array<float, kAccessC> fval;
+    PRAGMA_UNROLL
+    for (int j = 0; j < kAccessC; ++j) {
+        fval[j] = (float)val[j];
+    }
+
+    // Local butterfly stages (within kAccessC elements, register-only)
+    PRAGMA_UNROLL
+    for (int s = 0; s < kLocalStages; ++s) {
+        const int stride = 1 << s;
+        PRAGMA_UNROLL
+        for (int j = 0; j < kAccessC; ++j) {
+            if (j & stride) {
+                float a = fval[j - stride];
+                float b = fval[j];
+                fval[j - stride] = a + b;
+                fval[j]          = a - b;
+            }
+        }
+    }
+
+    // Shuffle butterfly stages — same pattern as hadamard_kernel.cu:
+    //   sign = (lane_id & mask) ? -1 : +1
+    //   x = sign * x + x_other
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    PRAGMA_UNROLL
+    for (int s = 0; s < kShuffleStages; ++s) {
+        const int mask   = 1 << s;
+        const float sign = (lane_id & mask) ? -1.f : 1.f;
+        PRAGMA_UNROLL
+        for (int j = 0; j < kAccessC; ++j) {
+            float other = __shfl_xor_sync(uint32_t(-1), fval[j], mask);
+            fval[j]     = sign * fval[j] + other;
+        }
+    }
+
+    // Normalization + convert back to T
+    const float scale = 1.0f / sqrtf((float)HeadDim);
+    PRAGMA_UNROLL
+    for (int j = 0; j < kAccessC; ++j) {
+        val[j] = (T)(fval[j] * scale);
+    }
+}
+
 namespace attention {
 struct DecodingCtaMap;
 }  // namespace attention
@@ -254,6 +320,19 @@ struct AttentionUniversal {
                 PRAGMA_UNROLL
                 for (int c = 0; c < ITER_C; ++c) {
                     logn_scaling.apply(vec_Q[s][c]);
+                }
+            }
+        }
+
+        // TurboQuant: rotate Q in registers before writing to smem
+        // (Hadamard before RoPE would also work since they commute in practice,
+        //  but matching PyTorch backend's order: Hadamard → RoPE)
+        if constexpr (Trait::kHadamardRotate) {
+            PRAGMA_UNROLL
+            for (int s = 0; s < ITER_S; ++s) {
+                PRAGMA_UNROLL
+                for (int c = 0; c < ITER_C; ++c) {
+                    hadamard_register_butterfly<T, kVecSize, kHeadDim>(vec_Q[s][c]);
                 }
             }
         }
