@@ -35,6 +35,21 @@ struct Config {
         return Trait::kBitsK;
     }
 
+    TM_HOST_DEVICE constexpr int v_bits() const
+    {
+        return Trait::kBitsV;
+    }
+
+    TM_HOST_DEVICE constexpr int k_param_count() const
+    {
+        return Trait::kParamCountK;
+    }
+
+    TM_HOST_DEVICE constexpr int v_param_count() const
+    {
+        return Trait::kParamCountV;
+    }
+
     TM_HOST_DEVICE constexpr int head_dim() const
     {
         return HeadDim;
@@ -148,40 +163,82 @@ struct Layout {
 
     TM_HOST_DEVICE constexpr bool is_share_kv() const
     {
-        // return 0;
         return config().is_share_kv();
     }
 
     TM_HOST_DEVICE constexpr int kv_num() const
     {
-        // return 2;
         return is_share_kv() ? 1 : 2;
     }
 
-    TM_HOST_DEVICE int token_data_size() const
+    // ---- Token data/param sizes ----
+    // For asymmetric K/V, use k_* and v_* variants.
+    // Legacy accessors delegate to k_* for backward compat.
+
+    TM_HOST_DEVICE int k_token_data_size() const
     {
         return config().q_bits() * config().head_dim() / 8;
     }
 
+    TM_HOST_DEVICE int v_token_data_size() const
+    {
+        return config().v_bits() * config().head_dim() / 8;
+    }
+
+    TM_HOST_DEVICE int k_token_param_size() const
+    {
+        return config().t_bits() * config().k_param_count() / 8;
+    }
+
+    TM_HOST_DEVICE int v_token_param_size() const
+    {
+        return config().t_bits() * config().v_param_count() / 8;
+    }
+
+    TM_HOST_DEVICE int token_data_size() const
+    {
+        return k_token_data_size();
+    }
+
     TM_HOST_DEVICE int token_param_size() const
     {
-        return config().t_bits() * 2 / 8;  // 2 for scales/zeros
+        return k_token_param_size();
+    }
+
+    TM_HOST_DEVICE int k_head_data_size() const
+    {
+        return config().block_len() * k_token_data_size();
+    }
+
+    TM_HOST_DEVICE int v_head_data_size() const
+    {
+        return is_share_kv() ? 0 : config().block_len() * v_token_data_size();
+    }
+
+    TM_HOST_DEVICE int k_head_param_size() const
+    {
+        return config().block_len() * k_token_param_size();
+    }
+
+    TM_HOST_DEVICE int v_head_param_size() const
+    {
+        return is_share_kv() ? 0 : config().block_len() * v_token_param_size();
     }
 
     TM_HOST_DEVICE int head_data_size() const
     {
-        return config().block_len() * token_data_size();
+        return k_head_data_size();
     }
 
     TM_HOST_DEVICE int head_param_size() const
     {
-        return config().block_len() * token_param_size();
+        return k_head_param_size();
     }
 
     TM_HOST_DEVICE int layer_size() const
     {
-        // TODO: enforce alignment
-        return config().head_num() * kv_num() * head_data_size() + config().head_num() * kv_num() * head_param_size();
+        return config().head_num() * (k_head_data_size() + v_head_data_size())
+               + config().head_num() * (k_head_param_size() + v_head_param_size());
     }
 
     TM_HOST_DEVICE int block_size(int layer_num) const
@@ -196,7 +253,7 @@ struct Layout {
 
     TM_HOST_DEVICE int v_data(int layer, int head, int token) const
     {
-        return k_data(layer, head, token) + (is_share_kv() ? 0 : head_data_size());
+        return k_data(layer, head, token) + k_head_data_size();
     }
 
     TM_HOST_DEVICE int k_param(int layer, int head, int token) const
@@ -206,7 +263,7 @@ struct Layout {
 
     TM_HOST_DEVICE int v_param(int layer, int head, int token) const
     {
-        return k_param(layer, head, token) + (is_share_kv() ? 0 : head_param_size());
+        return k_param(layer, head, token) + k_head_param_size();
     }
 
     TM_HOST_DEVICE int layer_data(int layer) const
@@ -216,27 +273,27 @@ struct Layout {
 
     TM_HOST_DEVICE int layer_param(int layer) const
     {
-        return layer_data(layer) + head_data(config_.head_num());
+        return layer_data(layer) + config_.head_num() * (k_head_data_size() + v_head_data_size());
     }
 
     TM_HOST_DEVICE int head_data(int head) const
     {
-        return head * kv_num() * head_data_size();
+        return head * (k_head_data_size() + v_head_data_size());
     }
 
     TM_HOST_DEVICE int head_param(int head) const
     {
-        return head * kv_num() * head_param_size();
+        return head * (k_head_param_size() + v_head_param_size());
     }
 
     TM_HOST_DEVICE int token_data(int ti) const
     {
-        return ti * token_data_size();
+        return ti * k_token_data_size();
     }
 
     TM_HOST_DEVICE int token_param(int ti) const
     {
-        return ti * token_param_size();
+        return ti * k_token_param_size();
     }
 };
 

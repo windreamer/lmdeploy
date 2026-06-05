@@ -24,6 +24,10 @@ struct KvQuantInt8 {
 struct KvQuantInt4 {
 };
 
+/// TurboQuant: K=4bit QJL4 (codebook), V=2bit MSE (codebook), Hadamard rotation
+struct KvQuantTurbo {
+};
+
 // ---------------------------------------------------------------------------
 // KvQuantTrait<Tag> — central type trait for KV cache quantization
 // ---------------------------------------------------------------------------
@@ -116,15 +120,44 @@ struct KvQuantTrait<KvQuantInt4, T> {
     static constexpr bool kHadamardRotate = false;
 };
 
+// ---- KvQuantTurbo (TurboQuant: K=4bit QJL4, V=2bit MSE) ----
+
+template<class T>
+struct KvQuantTrait<KvQuantTurbo, T> {
+    // K: 4-bit QJL4 — 3-bit Lloyd-Max index + 1-bit QJL sign, packed as nibble
+    using StorageK = uint4_t;
+    // V: 2-bit Lloyd-Max MSE, 4 values packed per uint8_t
+    using StorageV = uint2_t;
+
+    using PointerK = SubBytePtr<uint4_t>;
+    using PointerV = SubBytePtr<uint2_t>;
+
+    static constexpr int kBitsK = 4;
+    static constexpr int kBitsV = 2;
+
+    static constexpr bool kQuantKV = true;
+
+    // K: [mse_norm, qjl_norm], V: [norm]
+    static constexpr int kParamCountK = 2;
+    static constexpr int kParamCountV = 1;
+
+    static constexpr int kv_quant = 42;
+
+    static constexpr bool kHadamardRotate = true;
+};
+
 // ---------------------------------------------------------------------------
 // Helper: select KvQuant tag from runtime quant_policy value
 // ---------------------------------------------------------------------------
 
 template<int quant_policy>
 struct KvQuantFromPolicy {
-    using type = std::conditional_t<quant_policy & 0x04,
-                                    KvQuantInt4,
-                                    std::conditional_t<quant_policy & 0x08, KvQuantInt8, KvQuantNone>>;
+    using type =
+        std::conditional_t<quant_policy == 42,
+                           KvQuantTurbo,
+                           std::conditional_t<quant_policy & 0x04,
+                                              KvQuantInt4,
+                                              std::conditional_t<quant_policy & 0x08, KvQuantInt8, KvQuantNone>>>;
 };
 
 template<int quant_policy>
