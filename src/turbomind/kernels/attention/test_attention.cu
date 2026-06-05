@@ -46,6 +46,26 @@ struct Config {
         return bitsof<Tkv>;
     }
 
+    // TurboQuant: V uses different bit-width than K
+    TM_HOST_DEVICE constexpr int v_bits() const
+    {
+#if KV_TURBO
+        return 2;  // TurboQuant V=2bit MSE
+#else
+        return q_bits();  // symmetric by default
+#endif
+    }
+
+    TM_HOST_DEVICE constexpr int k_param_count() const
+    {
+        return 2;  // default
+    }
+
+    TM_HOST_DEVICE constexpr int v_param_count() const
+    {
+        return 2;  // default
+    }
+
     TM_HOST_DEVICE constexpr int head_dim() const
     {
         return head_dim_;
@@ -217,6 +237,8 @@ double get_memory_bandwidth()  // -> GB/s
 
 #define KV_INT4 0
 
+#define KV_TURBO 0
+
 #define DECODING 0
 
 #define SINK 5
@@ -289,6 +311,9 @@ int test_attention()
 #elif KV_INT4
     using Tkv                  = uint4_t;
     constexpr int kQuantPolicy = QuantPolicy::kCacheKVInt4;
+#elif KV_TURBO
+    using Tkv                  = uint4_t;  // K=4bit; V=2bit handled via quant_policy dispatch
+    constexpr int kQuantPolicy = QuantPolicy::kCacheKVTurbo;
 #else
     using Tkv                  = T;
     constexpr int kQuantPolicy = 0;

@@ -44,4 +44,21 @@ if (BUILD_TEST)
     target_link_libraries(test_quant PRIVATE
         nvidia::cutlass::cutlass
     )
+
+    add_executable(test_turboquant_attention
+        test_utils.cu
+        test_turboquant_attention.cu
+        reference.cu)
+    target_compile_options(test_turboquant_attention PRIVATE
+        --generate-line-info -O3 -use_fast_math --expt-relaxed-constexpr
+        -DKV_TURBO=1 -DDECODING=1 -DSINK=0)
+    target_link_libraries(test_turboquant_attention PRIVATE
+        attention
+        nvidia::cutlass::cutlass
+        models
+        unfused_attention_kernels
+        core
+        cuda_utils
+        fmt::fmt
+        cublas)
 endif ()

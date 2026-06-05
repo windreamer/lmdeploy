@@ -18,6 +18,7 @@ enum QuantPolicy
     // quantize cache kv
     kCacheKVInt8 = 0x08,
     kCacheKVInt4 = 0x04,
+    kCacheKVTurbo = 0x2A,  // K=4bit QJL4 + V=2bit MSE
 };
 
 enum CmpMode

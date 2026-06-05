@@ -331,11 +331,24 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                         PRAGMA_UNROLL
                         for (int c = 0; c < ITER_C; ++c) {
                             int di = offset.x + c * Map::kDeltaC;
-                            // Write packed K data (uint32_t reinterpreted as Array<uint4_t,8>)
-                            Store(&k_cache[di], (Array<uint4_t, kVecSize>&)out_K[s][c]);
+                            // Write packed K: reinterpret out_K as uint32_t, write to raw pointer
+                            // SubBytePtr<uint4_t>[di] = base + di*4/8 = base + di/2
+                            if constexpr (Trait::kBitsK < 8) {
+                                const uint32_t pk = reinterpret_cast<uint32_t&>(out_K[s][c]);
+                                *reinterpret_cast<uint32_t*>(k_cache.ptr_ + di * Trait::kBitsK / 8) = pk;
+                            }
+                            else {
+                                Store(&k_cache[di], out_K[s][c]);
+                            }
                             if constexpr (HAS_V) {
-                                // Write packed V data (uint16_t reinterpreted as Array<uint2_t,8>)
-                                Store(&v_cache[di], (Array<uint2_t, kVecSize>&)out_V[s][c]);
+                                // Write packed V: reinterpret out_V as uint16_t
+                                if constexpr (Trait::kBitsV < 8) {
+                                    const uint16_t pv = reinterpret_cast<uint16_t&>(out_V[s][c]);
+                                    *reinterpret_cast<uint16_t*>(v_cache.ptr_ + di * Trait::kBitsV / 8) = pv;
+                                }
+                                else {
+                                    Store(&v_cache[di], out_V[s][c]);
+                                }
                             }
                         }
                         if (offset.x == 0) {
@@ -492,14 +505,14 @@ void invokeProcessKV_v2(char**                 blocks,
         TM_UNREACHABLE;
     };
 
-    if (quant_policy & QuantPolicy::kCacheKVInt8) {
+    if (quant_policy == 42) {
+        dispatch(attention::KvQuantTurbo{});
+    }
+    else if (quant_policy & QuantPolicy::kCacheKVInt8) {
         dispatch(attention::KvQuantInt8{});
     }
     else if (quant_policy & QuantPolicy::kCacheKVInt4) {
         dispatch(attention::KvQuantInt4{});
-    }
-    else if (quant_policy == 42) {
-        dispatch(attention::KvQuantTurbo{});
     }
     else {
         dispatch(attention::KvQuantNone{});
@@ -626,9 +639,14 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
                     PRAGMA_UNROLL
                     for (int c = 0; c < ITER_C; ++c) {
                         int di = offset.x + c * Map::kDeltaC;
-                        // Read K packed data (uint32_t underlying Array<uint4_t,8>)
+                        // Read K packed data directly from SubBytePtr raw pointer
                         uint32_t packed_k;
-                        Ldg(reinterpret_cast<Array<uint4_t, kVecSize>&>(packed_k), &k_cache[di]);
+                        if constexpr (Trait::kBitsK < 8) {
+                            packed_k = *reinterpret_cast<uint32_t*>(k_cache.ptr_ + di * Trait::kBitsK / 8);
+                        }
+                        else {
+                            Ldg(reinterpret_cast<Array<uint4_t, kVecSize>&>(packed_k), &k_cache[di]);
+                        }
                         // Dequantize K: QJL4 → rotated domain
                         PRAGMA_UNROLL
                         for (int j = 0; j < kVecSize; ++j) {
@@ -642,7 +660,12 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
                         // Read + dequantize V: 2-bit
                         if constexpr (HAS_V) {
                             uint16_t packed_v;
-                            Ldg(reinterpret_cast<Array<uint2_t, kVecSize>&>(packed_v), &v_cache[di]);
+                            if constexpr (Trait::kBitsV < 8) {
+                                packed_v = *reinterpret_cast<uint16_t*>(v_cache.ptr_ + di * Trait::kBitsV / 8);
+                            }
+                            else {
+                                Ldg(reinterpret_cast<Array<uint2_t, kVecSize>&>(packed_v), &v_cache[di]);
+                            }
                             PRAGMA_UNROLL
                             for (int j = 0; j < kVecSize; ++j) {
                                 int idx2 = (packed_v >> (j * 2)) & 0x3;
@@ -877,14 +900,14 @@ void invokeFlattenKV_v2(T*                     k,
         TM_UNREACHABLE;
     };
 
-    if (quant_policy & QuantPolicy::kCacheKVInt8) {
+    if (quant_policy == 42) {
+        dispatch(attention::KvQuantTurbo{});
+    }
+    else if (quant_policy & QuantPolicy::kCacheKVInt8) {
         dispatch(attention::KvQuantInt8{});
     }
     else if (quant_policy & QuantPolicy::kCacheKVInt4) {
         dispatch(attention::KvQuantInt4{});
-    }
-    else if (quant_policy == 42) {
-        dispatch(attention::KvQuantTurbo{});
     }
     else {
         dispatch(attention::KvQuantNone{});

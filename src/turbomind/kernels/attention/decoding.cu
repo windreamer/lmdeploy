@@ -14,9 +14,9 @@ void dispatchDecoding(const AttentionParams<T>& params)
 {
     using namespace attention;
 
-    const bool is_kv_int8     = params.quant_policy & QuantPolicy::kCacheKVInt8;
-    const bool is_kv_int4     = params.quant_policy & QuantPolicy::kCacheKVInt4;
     const bool is_turbo_quant = params.quant_policy == 42;
+    const bool is_kv_int8     = !is_turbo_quant && (params.quant_policy & QuantPolicy::kCacheKVInt8);
+    const bool is_kv_int4     = !is_turbo_quant && (params.quant_policy & QuantPolicy::kCacheKVInt4);
     const int  query_group_sz = params.num_heads / params.num_kv_heads;
 
     TM_CHECK(!(is_kv_int4 && is_kv_int8));
