@@ -30,25 +30,6 @@ static void rotateQForTurboQuant(const AttentionParams<T>& params)
     hadamard_transform<T>(hp, params.stream);
 }
 
-// Apply inverse Hadamard to attention output for TurboQuant decode path.
-template<class T>
-static void invRotateOutputForTurboQuant(const AttentionParams<T>& params)
-{
-    const int head_dim  = params.size_per_head;
-    const int num_heads = params.num_heads;
-
-    HadamardParams hp{};
-    hp.batch   = params.batch_size * num_heads;
-    hp.dim     = head_dim;
-    hp.log_dim = static_cast<int>(log2(head_dim));
-    hp.stride  = head_dim;
-    hp.scale   = 1.0f / sqrtf((float)head_dim);
-    hp.x_ptr   = params.out;
-    hp.out_ptr  = params.out;  // in-place
-
-    hadamard_transform<T>(hp, params.stream);
-}
-
 template<class T>
 void dispatchDecoding(const AttentionParams<T>& params)
 {
@@ -82,10 +63,10 @@ void dispatchDecoding(const AttentionParams<T>& params)
 
     TM_SCOPE_CALL(kernel->Launch(&params, reg.sm_count()));
 
-    // TurboQuant: inverse-rotate output after attention + split-K reduction
-    if (is_turbo_quant) {
-        invRotateOutputForTurboQuant(params);
-    }
+    // Output inverse Hadamard is now fused into the reduce kernel (invokeReduceV3).
+    // When split_cnt > 1: reduce kernel does split-K reduction + Hadamard.
+    // When split_cnt == 1 but TurboQuant: reduce kernel is still invoked for Hadamard only.
+    // No standalone Hadamard kernel needed on the output path.
 }
 
 template void dispatchDecoding(const AttentionParams<half>& params);

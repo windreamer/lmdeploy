@@ -79,6 +79,7 @@ void invokeAttention(const typename Kernel::ParamType& params, int sm_count, int
                                                     params.token_num,
                                                     params.num_heads,
                                                     params.inv_sqrt_dh,
+                                                    false,  // prefill: no Hadamard fusion yet
                                                     params.stream);
     }
 }

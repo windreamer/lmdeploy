@@ -68,7 +68,12 @@ bool invokeDecoding(const typename Kernel::ParamType& params, int sm_count, int 
         params.cp_fn(params.cp_fn_ctx);
     }
 
-    if (split_cnt > 1 || params.cp_size > 1) {
+    const bool is_turbo_quant = params.quant_policy == 42;
+
+    // For TurboQuant: always invoke reduce to fuse the output Hadamard rotation,
+    // even when split_cnt == 1 (the reduce kernel handles the Hadamard butterfly
+    // on s_out before writing to gmem).
+    if (split_cnt > 1 || params.cp_size > 1 || is_turbo_quant) {
         attention::invokeReduceV3<Kernel::kHeadDim>(params.out,
                                                     params.partial_ML,
                                                     params.partial_O,
@@ -80,6 +85,7 @@ bool invokeDecoding(const typename Kernel::ParamType& params, int sm_count, int 
                                                     params.token_num,
                                                     params.num_heads,
                                                     params.inv_sqrt_dh,
+                                                    is_turbo_quant,
                                                     params.stream);
     }
 

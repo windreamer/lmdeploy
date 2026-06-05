@@ -10,7 +10,57 @@
 
 namespace turbomind::attention {
 
-template<int CP, int CTA_K, int HeadDim, int WarpCnt, bool First, class T>
+// ---------------------------------------------------------------------------
+// Fused Hadamard butterfly on shared memory
+// ---------------------------------------------------------------------------
+// Applies orthogonal Hadamard transform to s_out[0][0..HeadDim-1] in-place.
+// H is symmetric and Q = H/sqrt(d) is orthogonal, so Q^{-1} = Q (same transform).
+//
+// Butterfly: log2(HeadDim) stages, each reads pairs (i, i^stride), writes (a+b, a-b).
+// Final normalization: multiply by 1/sqrt(d).
+// ---------------------------------------------------------------------------
+
+template<int HeadDim, int WarpCnt>
+__device__ void hadamard_smem_butterfly(float* s_out_row)
+{
+    constexpr int kLogDim = static_cast<int>(log2(HeadDim));
+    const float kScale = 1.0f / sqrtf((float)HeadDim);
+    constexpr int kThreads = WarpCnt * WARP_SIZE;
+
+    const int tid = threadIdx.x;
+
+    PRAGMA_UNROLL
+    for (int s = 0; s < kLogDim; ++s) {
+        const int stride = 1 << s;
+        // Each thread processes a contiguous slice of indices
+        constexpr int kPerThread = (HeadDim + kThreads - 1) / kThreads;
+        PRAGMA_UNROLL
+        for (int p = 0; p < kPerThread; ++p) {
+            int i = tid + p * kThreads;
+            if (i < HeadDim && !(i & stride)) {
+                int j = i ^ stride;
+                float a = s_out_row[i];
+                float b = s_out_row[j];
+                s_out_row[i] = a + b;
+                s_out_row[j] = a - b;
+            }
+        }
+        __syncthreads();
+    }
+
+    // Apply normalization
+    constexpr int kPerThreadN = (HeadDim + kThreads - 1) / kThreads;
+    PRAGMA_UNROLL
+    for (int p = 0; p < kPerThreadN; ++p) {
+        int i = tid + p * kThreads;
+        if (i < HeadDim) {
+            s_out_row[i] *= kScale;
+        }
+    }
+    __syncthreads();
+}
+
+template<int CP, int CTA_K, int HeadDim, int WarpCnt, bool First, bool ApplyHadamard, class T>
 __global__ void reduce(T*         out,
                        float*     partial_ML,
                        float*     partial_O,
@@ -196,8 +246,21 @@ __global__ void reduce(T*         out,
     for_each([&](int c, int ki, int di) {
         if (ki == 0) {
             if (gridDim.z == 1) {
-                const int offset = (query_idx * head_num + head_idx) * HeadDim + di;
-                Store(&out[offset], cast<T>((Vec&)s_out[ki][di]));
+                // Final output — apply Hadamard if TurboQuant before writing to gmem
+                if constexpr (ApplyHadamard) {
+                    // Only one thread needs to trigger the smem butterfly (all threads participate)
+                    if (c == 0 && di == 0) {
+                        hadamard_smem_butterfly<HeadDim, WarpCnt>(s_out[0]);
+                    }
+                    // No syncthreads needed here — hadamard_smem_butterfly ends with one
+                    // Now read the Hadamard-transformed result from smem
+                    const int offset = (query_idx * head_num + head_idx) * HeadDim + di;
+                    Store(&out[offset], cast<T>((Vec&)s_out[ki][di]));
+                }
+                else {
+                    const int offset = (query_idx * head_num + head_idx) * HeadDim + di;
+                    Store(&out[offset], cast<T>((Vec&)s_out[ki][di]));
+                }
             }
             else {
                 const int offset = ((query_idx * head_num + head_idx) * max_split_cnt + offset_k) * HeadDim + di;
@@ -219,6 +282,7 @@ void invokeReduceV3(T*           out,
                     int          query_num,
                     int          head_num,
                     float        exp_scale,
+                    bool         apply_hadamard,
                     cudaStream_t stream)
 {
     constexpr int CTA_K = 32;  // warp size
@@ -229,11 +293,11 @@ void invokeReduceV3(T*           out,
 
     partial_ML -= cp_rank * query_num * head_num * partial_len * 2;  // begin address of cp_rank0
 
-    auto invoke = [&](auto cp, auto is_first, int stride_k) {
+    auto invoke = [&](auto cp, auto is_first, auto do_hadamard, int stride_k) {
         const dim3 block = kWarpCnt * WARP_SIZE;
         const dim3 grid  = ReduceCtaMap::get_grid_shape(query_num, head_num, max_split_cnt, CTA_K);
 
-        reduce<cp, CTA_K, HeadDim, kWarpCnt, is_first><<<grid, block, kSmemSize, stream>>>(  //
+        reduce<cp, CTA_K, HeadDim, kWarpCnt, is_first, do_hadamard><<<grid, block, kSmemSize, stream>>>(  //
             out,
             partial_ML,
             partial_O,
@@ -248,20 +312,29 @@ void invokeReduceV3(T*           out,
     };
 
     auto dispatch_cp = [&](int stride_k, auto is_first) {
-        switch (cp_size) {
+        // Dispatch on apply_hadamard (runtime bool → compile-time constant)
+        auto dispatch_hadamard = [&](auto do_hadamard) {
+            switch (cp_size) {
 #define LAUNCH_INVOKE(n)                                                                                               \
     case n:                                                                                                            \
-        invoke(std::integral_constant<int, n>{}, is_first, stride_k);                                                  \
+        invoke(std::integral_constant<int, n>{}, is_first, do_hadamard, stride_k);                                     \
         break;
-            LAUNCH_INVOKE(1);
-            LAUNCH_INVOKE(2);
-            LAUNCH_INVOKE(4);
-            LAUNCH_INVOKE(8);
-            LAUNCH_INVOKE(16);
-            LAUNCH_INVOKE(32);
-            default:
-                TM_CHECK(false) << "reduce does not support cp_size = " << cp_size;
+                LAUNCH_INVOKE(1);
+                LAUNCH_INVOKE(2);
+                LAUNCH_INVOKE(4);
+                LAUNCH_INVOKE(8);
+                LAUNCH_INVOKE(16);
+                LAUNCH_INVOKE(32);
+                default:
+                    TM_CHECK(false) << "reduce does not support cp_size = " << cp_size;
 #undef LAUNCH_INVOKE
+            }
+        };
+        if (apply_hadamard) {
+            dispatch_hadamard(std::true_type{});
+        }
+        else {
+            dispatch_hadamard(std::false_type{});
         }
     };
 
@@ -289,6 +362,7 @@ void invokeReduceV3(T*           out,
                                       int          query_num,                                                          \
                                       int          head_num,                                                           \
                                       float        exp_scale,                                                          \
+                                      bool         apply_hadamard,                                                     \
                                       cudaStream_t stream);
 
 INSTANTIATE_invokeReduceV3(64, half);

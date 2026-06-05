@@ -23,5 +23,6 @@ void invokeReduceV3(T*           out,
                     int          query_num,
                     int          head_num,
                     float        exp_scale,
+                    bool         apply_hadamard,
                     cudaStream_t stream);
 }  // namespace turbomind::attention
