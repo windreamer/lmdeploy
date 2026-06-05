@@ -84,7 +84,8 @@ public:
         int v_param_count_;
         bool share_kv_;
         int  t_bits() const { return t_bits_; }
-        int  q_bits() const { return q_bits_; }
+        int  k_bits() const { return q_bits_; }
+        int  q_bits() const { return q_bits_; }  // legacy alias for k_bits()
         int  v_bits() const { return v_bits_ ? v_bits_ : q_bits_; }
         int  k_param_count() const { return k_param_count_ ? k_param_count_ : 2; }
         int  v_param_count() const { return v_param_count_ ? v_param_count_ : 2; }

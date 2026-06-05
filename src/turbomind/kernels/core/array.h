@@ -143,6 +143,50 @@ static_assert(sizeof(Array<uint4_t, 24>) == 12);
 static_assert(sizeof(Array<uint4_t, 32>) == 16);
 
 template<int N>
+struct Array<uint2_t, N> {
+    using value_type      = detail::__uint2_t;
+    using size_type       = int;
+    using difference_type = int;
+    using reference       = value_type&;
+    using const_reference = const value_type&;
+    using pointer         = SubBytePtr<uint2_t>;
+    using const_pointer   = SubBytePtr<const uint2_t>;
+
+    static_assert(N % 16 == 0, "Array<uint2_t, N> requires N to be a multiple of 16 for 16x packing");
+
+    detail::__uint2_t __a[N / 16];
+
+    TM_HOST_DEVICE constexpr reference operator[](size_type i) noexcept
+    {
+        return __a[i / 16];
+    }
+
+    TM_HOST_DEVICE constexpr const_reference operator[](size_type i) const noexcept
+    {
+        return __a[i / 16];
+    }
+
+    TM_HOST_DEVICE static constexpr std::integral_constant<int, N> size() noexcept
+    {
+        return {};
+    }
+
+    TM_HOST_DEVICE static constexpr std::false_type empty() noexcept
+    {
+        return {};
+    }
+
+    TM_HOST_DEVICE constexpr pointer data() noexcept
+    {
+        return {(char*)&__a[0]};
+    }
+};
+
+static_assert(sizeof(Array<uint2_t, 16>) == 4);
+static_assert(sizeof(Array<uint2_t, 32>) == 8);
+static_assert(sizeof(Array<uint2_t, 64>) == 16);
+
+template<int N>
 struct Array<fp4_e2m1_t, N> {
     using value_type      = detail::__uint4_t;
     using size_type       = int;

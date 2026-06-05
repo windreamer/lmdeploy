@@ -29,7 +29,8 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
     using KvQuant = KvQuant_;
     using Trait   = KvQuantTrait<KvQuant, T>;
 
-    using Tkv = typename Trait::StorageK;  // backward compat: most code uses Tkv
+    using TK = typename Trait::StorageK;
+    using TV = typename Trait::StorageV;
 
     static constexpr int kQuantKV = Trait::kQuantKV;
 
@@ -78,16 +79,16 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
     using FragM = Array<float, 2>[K_N];       // (_8,q4)    (Qn)    (q2)
                                               //      2       8       1
 
-    static constexpr int X = 16 / Trait::kBitsK;
+    static constexpr int XK = 16 / Trait::kBitsK;
+    static constexpr int XV = 16 / Trait::kBitsV;
 
-    using DataK = Array<Tkv, 8 * X>[K_K / X][K_M];  // {s8,d4} [Dk/x,Sm] (d2,s2,dx,d2)
-                                                    //   1 2x    16x 16   8x  8  2  1
-    using ParamK = Array<T, 2>[K_M][2];             // {s8,_4} [     Sm] (   s2      )
-                                                    //   1  0        16       8
-    using DataV = Array<Tkv, 8 * X>[V_M / X][V_K];  // {s8,d4} [Dm/x,Sk] (s2,d2,dx,d2)
-                                                    //   1 2x    16x 16    8 8x  2  1
-    using ParamV = Array<T, 2>[V_K][2];             // {s8,_4} [     Sk] (s2         )
-                                                    //   1  0        16    8
+    using DataK = Array<TK, 8 * XK>[K_K / XK][K_M];  // {s8,d4} [Dk/x,Sm] (d2,s2,dx,d2)
+                                                     //   1 2x    16x 16   8x  8  2  1
+    using ParamK = Array<T, 2>[K_M][2];              // {s8,_4} [     Sm] (   s2      )
+                                                     //   1  0        16       8
+    using DataV = Array<TV, 8 * XV>[V_M / XV][V_K];  // {s8,d4} [Dm/x,Sk] (s2,d2,dx,d2)
+                                                     //   1 2x    16x 16    8 8x  2  1
+    using ParamV = Array<T, 2>[V_K][2];              // {s8,_4} [     Sk] (s2         )
 
     using FragL = FragM;
 
@@ -114,20 +115,29 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
                                   SmemLayoutV2<CTA_S, HeadDim, 32, 128, Swizzle<2, 5, 3>>,
                                   SmemLayoutV2<CTA_S, HeadDim, 32, 64, Swizzle<3, 4, 3>>>{};
     }
+    static constexpr auto _SmemLayoutKV(std::integral_constant<int, 2>)
+    {
+        // V=2bit: 32B row width, Swizzle<3,6,3> for 16B alignment (Base=6 ≥ 6).
+        // C0=HeadDim (single tile) to ensure ldsm_x4 compatibility —
+        // C0=64 creates a two-tile layout that breaks ldsm's matrix read pattern.
+        return SmemLayoutV2<CTA_S, HeadDim, 64, HeadDim, Swizzle<3, 6, 3>>{};
+    }
 
     using SmemLayoutQ = SmemLayoutV2<CTA_H1, HeadDim, CTA_H1, HeadDim, Swizzle<3, 3, 4>>;
     using SmemLayoutK = decltype(_SmemLayoutKV(std::integral_constant<int, Trait::kBitsK>{}));
-    using SmemLayoutV = decltype(_SmemLayoutKV(std::integral_constant<int, Trait::kBitsK>{}));
+    using SmemLayoutV = decltype(_SmemLayoutKV(std::integral_constant<int, Trait::kBitsV>{}));
 
     using SmemLayoutKVp = SmemLayoutV2<CTA_S, 2, CTA_S, 2, Identity>;
 
-    using PointerKV = typename Trait::PointerK;
+    using PointerK = typename Trait::PointerK;
+    using PointerV = typename Trait::PointerV;
 
     union SharedStorage {
         __align__(16) T Q[SmemLayoutQ::kSize];
 
         struct {
-            __align__(16) Array<Tkv, Stages * SmemLayoutK::kSize> KV;
+            __align__(16) Array<TK, Stages * SmemLayoutK::kSize> K;
+            __align__(16) Array<TV, Stages * SmemLayoutV::kSize> V;
             __align__(16) T KVp[Stages * SmemLayoutKVp::kSize];
         };
 
@@ -140,13 +150,14 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
         __align__(16) float O1[CTA_H1][kHeadDim];
     };
 
-    using ThreadMapQ  = RakedThreadMap<HeadDim, CTA_H1, 8, kWarpCount>;
-    using ThreadMapKV = RakedThreadMap<HeadDim, CTA_S, 128 / Trait::kBitsK, kWarpCount>;
+    using ThreadMapQ = RakedThreadMap<HeadDim, CTA_H1, 8, kWarpCount>;
+    using ThreadMapK = RakedThreadMap<HeadDim, CTA_S, 128 / Trait::kBitsK, kWarpCount>;
+    using ThreadMapV = RakedThreadMap<HeadDim, CTA_S, 128 / Trait::kBitsV, kWarpCount>;
     // `WARP_SIZE / WARP_S` is chosen to achieve minimum kIterS w/o introducing partial S iter
     using ThreadMapKVp = RakedThreadMap<2, CTA_S, 2, kWarpCount, WARP_SIZE / WARP_S>;
 
-    static constexpr int kBatchK = ThreadMapKV::kIterS;
-    static constexpr int kBatchV = ThreadMapKV::kIterS;
+    static constexpr int kBatchK = ThreadMapK::kIterS;
+    static constexpr int kBatchV = ThreadMapV::kIterS;
 
     static constexpr bool kDeferReduceL = true;
 
@@ -165,12 +176,12 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
     {
         int pred = offset_kv;
         if constexpr (kQuantKV) {
-            gmem_K.SetSmem(storage.KV.data(), storage.KVp);
-            gmem_V.SetSmem(storage.KV.data() + pred * SmemLayoutK::kSize, storage.KVp + pred * SmemLayoutKVp::kSize);
+            gmem_K.SetSmem(storage.K.data(), storage.KVp);
+            gmem_V.SetSmem(storage.V.data(), storage.KVp + pred * SmemLayoutKVp::kSize);
         }
         else {
-            gmem_K.SetSmem(storage.KV.data());
-            gmem_V.SetSmem(storage.KV.data() + pred * SmemLayoutK::kSize);
+            gmem_K.SetSmem(storage.K.data());
+            gmem_V.SetSmem(storage.V.data() + pred * SmemLayoutV::kSize);
         }
     }
 
@@ -248,13 +259,13 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
             PRAGMA_UNROLL
             for (int n = 0; n < K_N; ++n) {
                 PRAGMA_UNROLL
-                for (int k = 0; k < K_K; k += X) {
+                for (int k = 0; k < K_K; k += XK) {
                     PRAGMA_UNROLL
-                    for (int x = 0; x < X; ++x) {
+                    for (int x = 0; x < XK; ++x) {
                         PRAGMA_UNROLL
                         for (int d = 0; d < 2; ++d) {  // (s8,d8)
                             const int hi = n * OP_N + lane_id / 4 + warp_ids.y * WARP_H;
-                            const int di = k * OP_K + lane_id % 4 * 2 * X + x * 2 + d * 8 * X;
+                            const int di = k * OP_K + lane_id % 4 * 2 * XK + x * 2 + d * 8 * XK;
                             Load((Array<T, 2>&)frag_Q[n][k + x][d * 2], &sQ(hi, di));
                         }
                     }
@@ -264,16 +275,16 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
     }
 
     struct StateQK {
-        PointerKV smem_K;
-        T*        smem_K_param;
-        FragQ     frag_Q;
-        ParamK    param_K;
-        DataK     data_K;
-        FragK     frag_K;
+        PointerK smem_K;
+        T*       smem_K_param;
+        FragQ    frag_Q;
+        ParamK   param_K;
+        DataK    data_K;
+        FragK    frag_K;
 
         __device__ StateQK(SharedStorage& storage, FragQ frag_Q_)
         {
-            smem_K       = storage.KV.data();
+            smem_K       = storage.K.data();
             smem_K_param = storage.KVp;
             static_assert(!kUseSmemQ, "not implemented");
             PRAGMA_UNROLL
@@ -300,15 +311,15 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
                 }
             }
 
-            if (k % X == 0) {
+            if (k % XK == 0) {
                 const int offset_s = lane_id % 16 * 1 + warp_ids.x * WARP_S;
-                const int offset_c = lane_id / 16 * 8 * X;
+                const int offset_c = lane_id / 16 * 8 * XK;
                 PRAGMA_UNROLL
                 for (int m = 0; m < K_M; ++m) {
                     const int s = m * 16 + offset_s;  // Q
                     const int c = k * 16 + offset_c;  // D
-                    static_assert(sizeof(data_K[k / X][m]) == 16);
-                    ldsm_x4((Array<uint32_t, 4>&)data_K[k / X][m],
+                    static_assert(sizeof(data_K[k / XK][m]) == 16 || kQuantKV, "unexpected DataK element size");
+                    ldsm_x4((Array<uint32_t, 4>&)data_K[k / XK][m],
                             cast_smem_ptr_to_uint(&smem_K[pipe_iter * SmemLayoutK::kSize + SmemLayoutK::apply(s, c)]));
                 }
             }
@@ -324,16 +335,16 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
             }
             else {  // this also covers non-quantized case, but it's too convolved to read
                 static_assert(K_M == 1);
-                if (k % X == 0) {
-                    using Converter = ConvertKvCache<Tkv, T>;
+                if (k % XK == 0) {
+                    using Converter = ConvertKvCache<TK, T>;
                     PRAGMA_UNROLL
                     for (int s = 0; s < 2; ++s) {
                         PRAGMA_UNROLL
                         for (int d = 0; d < 2; ++d) {
                             auto dx_d2 =
-                                Converter::convert((Array<Tkv, X * 2>&)data_K[k / X][0][d * 4 * X + s * 2 * X]);
+                                Converter::convert((Array<TK, XK * 2>&)data_K[k / XK][0][d * 4 * XK + s * 2 * XK]);
                             PRAGMA_UNROLL
-                            for (int x = 0; x < X; ++x) {
+                            for (int x = 0; x < XK; ++x) {
                                 (Array<short, 2>&)frag_K[k + x][0][d * 4 + s * 2] = (Array<short, 2>&)dx_d2[x * 2];
                             }
                         }
@@ -390,16 +401,16 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
     }
 
     struct StatePV {
-        PointerKV smem_V;
-        T*        smem_V_param;
-        ParamV    param_V;
-        DataV     data_V;
-        FragP     frag_P;
-        FragV     frag_V;
+        PointerV smem_V;
+        T*       smem_V_param;
+        ParamV   param_V;
+        DataV    data_V;
+        FragP    frag_P;
+        FragV    frag_V;
 
         __device__ StatePV(SharedStorage& storage, bool offset = false)
         {
-            smem_V       = storage.KV.data() + (offset ? SmemLayoutK::kSize : 0);
+            smem_V       = storage.V.data() + (offset ? SmemLayoutV::kSize : 0);
             smem_V_param = storage.KVp + (offset ? SmemLayoutKVp::kSize : 0);
         }
 
@@ -418,22 +429,22 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
                 }
             }
 
-            if (m % X == 0) {
+            if (m % XV == 0) {
                 const int offset_s = lane_id / 16 * 8 + lane_id % 8 + warp_ids.x * WARP_S;
-                const int offset_c = lane_id % 16 / 8 * 8 * X;
+                const int offset_c = lane_id % 16 / 8 * 8 * XV;
                 PRAGMA_UNROLL
                 for (int k = 0; k < V_K; ++k) {
                     const int s = k * 16 + offset_s;
                     const int c = m * 16 + offset_c;
-                    static_assert(sizeof(data_V[m / X][k]) == 16);
+                    static_assert(sizeof(data_V[m / XV][k]) == 16 || kQuantKV, "unexpected DataV element size");
                     if constexpr (!kQuantKV) {
                         ldsm_x4_trans(
-                            (Array<uint32_t, 4>&)data_V[m / X][k],
+                            (Array<uint32_t, 4>&)data_V[m / XV][k],
                             cast_smem_ptr_to_uint(&smem_V[pipe_iter * SmemLayoutV::kSize + SmemLayoutV::apply(s, c)]));
                     }
                     else {
                         ldsm_x4(
-                            (Array<uint32_t, 4>&)data_V[m / X][k],
+                            (Array<uint32_t, 4>&)data_V[m / XV][k],
                             cast_smem_ptr_to_uint(&smem_V[pipe_iter * SmemLayoutV::kSize + SmemLayoutV::apply(s, c)]));
                     }
                 }
@@ -450,15 +461,15 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
             }
             else {
                 static_assert(V_K == 1);
-                if (m % X == 0) {
+                if (m % XV == 0) {
                     PRAGMA_UNROLL
                     for (int s = 0; s < 2; ++s) {
                         PRAGMA_UNROLL
                         for (int d = 0; d < 2; ++d) {
-                            auto dx_d2 = ConvertKvCache<Tkv, T>::convert(
-                                (Array<Tkv, 2 * X>&)data_V[m / X][0][s * 4 * X + d * 2 * X]);
+                            auto dx_d2 = ConvertKvCache<TV, T>::convert(
+                                (Array<TV, 2 * XV>&)data_V[m / XV][0][s * 4 * XV + d * 2 * XV]);
                             PRAGMA_UNROLL
-                            for (int x = 0; x < X; ++x) {
+                            for (int x = 0; x < XV; ++x) {
                                 (Array<T, 2>&)frag_V[m + x][0][s * 4 + d * 2] = (Array<T, 2>&)dx_d2[x * 2];
                             }
                         }
@@ -753,9 +764,9 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
         __syncthreads();
 
         PRAGMA_UNROLL
-        for (int m = 0; m < V_M; m += X) {
+        for (int m = 0; m < V_M; m += XV) {
             PRAGMA_UNROLL
-            for (int x = 0; x < X; ++x) {
+            for (int x = 0; x < XV; ++x) {
                 PRAGMA_UNROLL
                 for (int n = 0; n < V_N; ++n) {
                     PRAGMA_UNROLL
@@ -772,7 +783,7 @@ struct Impl<MMA_81616, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WA
                             //   2  1
                             //   4  1
                             //   8  1
-                            const int di = m * OP_M + lane_id / 4 % 2 + d * 8 * X + x * 2 + lane_id / 8 * X * 2;
+                            const int di = m * OP_M + lane_id / 4 % 2 + d * 8 * XV + x * 2 + lane_id / 8 * XV * 2;
                             if (warp_ids.x == 0) {
                                 storage.O1[hi][di] = frag_O[m + x][n][d * 2 + q];
                                 // if (hi == 0) {

@@ -37,7 +37,8 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                                                     BlockLayout     block_layout)
 {
     using Trait = attention::KvQuantTrait<KvQuant, T>;
-    using Tkv   = typename Trait::StorageK;
+    using TK    = typename Trait::StorageK;
+    using TV    = typename Trait::StorageV;
 
     constexpr bool kQuantKV = Trait::kQuantKV;
 
@@ -106,6 +107,16 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                     Ldg(vec_V[s][c], &v[index]);
                 }
             }
+            else {
+                // Zero-initialize unused slots to prevent NaN propagation through warp reductions
+                PRAGMA_UNROLL
+                for (int j = 0; j < kVecSize; ++j) {
+                    vec_K[s][c][j] = (T)0.f;
+                    if constexpr (HAS_V) {
+                        vec_V[s][c][j] = (T)0.f;
+                    }
+                }
+            }
         }
     }
 
@@ -148,8 +159,12 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
     Array<T, 2> param_V[ITER_S];
 
     // Output arrays for quantized data (used by both affine and TurboQuant paths)
-    Array<Tkv, kVecSize> out_K[ITER_S][ITER_C];
-    Array<Tkv, kVecSize> out_V[ITER_S][ITER_C];
+    Array<TK, kVecSize> out_K[ITER_S][ITER_C];
+    // For 16× packed sub-byte V (uint2_t), out_V is unused in the TurboQuant Hadamard path.
+    // Declare with appropriate size to satisfy Array<N%16==0> constraint.
+    static constexpr int kVOutSize =
+        (Trait::kBitsV < 8) ? (sizeof(typename detail::__storage_of<TV>::type) * 8 / Trait::kBitsV) : kVecSize;
+    Array<TV, kVOutSize> out_V[ITER_S][ITER_C];
 
     blocks += cu_block_num[batch_idx];
 
@@ -163,7 +178,7 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
             for (int s = 0; s < ITER_S; ++s) {
                 PRAGMA_UNROLL
                 for (int c = 0; c < ITER_C; ++c) {
-                    // Register butterfly (same as attention_universal.h Fusion 1)
+                    // Register butterfly
                     Array<float, kVecSize> fval_k;
                     PRAGMA_UNROLL
                     for (int j = 0; j < kVecSize; ++j) {
@@ -176,8 +191,8 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                         PRAGMA_UNROLL
                         for (int j = 0; j < kVecSize; ++j) {
                             if (j & stride) {
-                                float a = fval_k[j - stride];
-                                float b = fval_k[j];
+                                float a            = fval_k[j - stride];
+                                float b            = fval_k[j];
                                 fval_k[j - stride] = a + b;
                                 fval_k[j]          = a - b;
                             }
@@ -185,13 +200,13 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                     }
                     // Shuffle butterfly
                     PRAGMA_UNROLL
-                    for (int stg = 0; stg < /*log2(HeadDim/kVecSize)*/ (HeadDim >= 256 ? 5 : HeadDim >= 128 ? 4 : 3); ++stg) {
-                        const int mask = 1 << stg;
+                    for (int stg = 0; stg < (HeadDim >= 256 ? 5 : HeadDim >= 128 ? 4 : 3); ++stg) {
+                        const int   mask = 1 << stg;
                         const float sign = (lane_id & mask) ? -1.f : 1.f;
                         PRAGMA_UNROLL
                         for (int j = 0; j < kVecSize; ++j) {
                             float other = __shfl_xor_sync(uint32_t(-1), fval_k[j], mask);
-                            fval_k[j] = sign * fval_k[j] + other;
+                            fval_k[j]   = sign * fval_k[j] + other;
                         }
                     }
                     // Scale + store back
@@ -213,8 +228,8 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                             PRAGMA_UNROLL
                             for (int j = 0; j < kVecSize; ++j) {
                                 if (j & stride) {
-                                    float a = fval_v[j - stride];
-                                    float b = fval_v[j];
+                                    float a            = fval_v[j - stride];
+                                    float b            = fval_v[j];
                                     fval_v[j - stride] = a + b;
                                     fval_v[j]          = a - b;
                                 }
@@ -222,12 +237,12 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                         }
                         PRAGMA_UNROLL
                         for (int stg = 0; stg < (HeadDim >= 256 ? 5 : HeadDim >= 128 ? 4 : 3); ++stg) {
-                            const int mask = 1 << stg;
+                            const int   mask = 1 << stg;
                             const float sign = (lane_id & mask) ? -1.f : 1.f;
                             PRAGMA_UNROLL
                             for (int j = 0; j < kVecSize; ++j) {
                                 float other = __shfl_xor_sync(uint32_t(-1), fval_v[j], mask);
-                                fval_v[j] = sign * fval_v[j] + other;
+                                fval_v[j]   = sign * fval_v[j] + other;
                             }
                         }
                         PRAGMA_UNROLL
@@ -237,7 +252,7 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                     }
                 }
             }
-            // Step 2: L2 norms + quantize (per-token)
+            // Step 2: L2 norms + quantize + store to block cache (per-token)
             PRAGMA_UNROLL
             for (int s = 0; s < ITER_S; ++s) {
                 float sum_k_sq = 0.f, sum_v_sq = 0.f, residual_sq = 0.f;
@@ -253,75 +268,77 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                         }
                     }
                 }
+                // Warp reduction: only across C-dimension lanes (kWarpThreadC),
+                // NOT across S-dimension (different tokens share the same warp).
+                // Using kWarpThreadC as limit avoids cross-token contamination.
                 PRAGMA_UNROLL
-                for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+                for (int mask = Map::kWarpThreadC / 2; mask >= 1; mask /= 2) {
                     sum_k_sq += __shfl_xor_sync(uint32_t(-1), sum_k_sq, mask);
                     sum_v_sq += __shfl_xor_sync(uint32_t(-1), sum_v_sq, mask);
                 }
-                float mse_norm    = sqrtf(sum_k_sq);
-                float v_norm      = sqrtf(sum_v_sq);
+                float mse_norm     = sqrtf(sum_k_sq);
+                float v_norm       = sqrtf(sum_v_sq);
                 float inv_mse_norm = (mse_norm > 0.f) ? 1.f / mse_norm : 0.f;
                 float inv_v_norm   = (v_norm > 0.f) ? 1.f / v_norm : 0.f;
-                float sigma       = 1.f / sqrtf((float)HeadDim);
+                float sigma        = 1.f / sqrtf((float)HeadDim);
                 // QJL4 quantize K + accumulate residual
-                Array<uint4_t, kVecSize> qk[ITER_C];
+                uint32_t packed_k_arr[ITER_C];
                 PRAGMA_UNROLL
                 for (int c = 0; c < ITER_C; ++c) {
-                    uint8_t nibbles[kVecSize];
-                    PRAGMA_UNROLL
-                    for (int j = 0; j < kVecSize; ++j) {
-                        float y  = (float)vec_K[s][c][j] * inv_mse_norm;
-                        int idx3 = attention::quantize_k4_mse(y, sigma);
-                        float centroid = attention::dequantize_k4_mse(idx3, sigma);
-                        float res = y - centroid;
-                        int sign_bit = (res >= 0.f) ? 1 : 0;
-                        residual_sq += res * res;
-                        nibbles[j] = (uint8_t)(idx3 | (sign_bit << 3));
-                    }
                     uint32_t packed = 0;
                     PRAGMA_UNROLL
                     for (int j = 0; j < kVecSize; ++j) {
-                        packed |= ((uint32_t)nibbles[j] << (j * 4));
+                        float y        = (float)vec_K[s][c][j] * inv_mse_norm;
+                        int   idx3     = attention::quantize_k4_mse(y, sigma);
+                        float centroid = attention::dequantize_k4_mse(idx3, sigma);
+                        float res      = y - centroid;
+                        int   sign_bit = (res >= 0.f) ? 1 : 0;
+                        residual_sq += res * res;
+                        packed |= ((uint32_t)(idx3 | (sign_bit << 3)) << (j * 4));
                     }
-                    qk[c] = (Array<uint4_t, kVecSize>&)packed;
+                    packed_k_arr[c] = packed;
                 }
                 PRAGMA_UNROLL
-                for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+                for (int mask = Map::kWarpThreadC / 2; mask >= 1; mask /= 2) {
                     residual_sq += __shfl_xor_sync(uint32_t(-1), residual_sq, mask);
                 }
                 float qjl_norm = sqrtf(residual_sq / (float)HeadDim);
                 // 2-bit MSE quantize V
-                Array<uint2_t, kVecSize> qv[ITER_C];
+                uint16_t packed_v_arr[ITER_C];
                 if constexpr (HAS_V) {
                     PRAGMA_UNROLL
                     for (int c = 0; c < ITER_C; ++c) {
-                        uint16_t packed_v = 0;
+                        uint16_t pv = 0;
                         PRAGMA_UNROLL
                         for (int j = 0; j < kVecSize; ++j) {
-                            float u = (float)vec_V[s][c][j] * inv_v_norm;
-                            int idx2 = attention::quantize_v2(u, sigma);
-                            packed_v |= ((uint16_t)idx2 << (j * 2));
+                            float u    = (float)vec_V[s][c][j] * inv_v_norm;
+                            int   idx2 = attention::quantize_v2(u, sigma);
+                            pv |= ((uint16_t)idx2 << (j * 2));
                         }
-                        qv[c] = (Array<uint2_t, kVecSize>&)packed_v;
+                        packed_v_arr[c] = pv;
+                    }
+                }
+                // Warp shuffle for 16× packed V: combine two threads' 8-value packs into one uint32_t word.
+                // Even C-dim threads (lane_id & 1 == 0) hold the lower 8 values; odd threads hold the upper 8.
+                // After shuffle, only even threads write the combined word to avoid data races.
+                uint32_t combined_v_arr[ITER_C];
+                if constexpr (HAS_V && Trait::kBitsV < 8) {
+                    PRAGMA_UNROLL
+                    for (int c = 0; c < ITER_C; ++c) {
+                        uint32_t neighbor = __shfl_xor_sync(uint32_t(-1), (uint32_t)packed_v_arr[c], 1);
+                        if (lane_id & 1) {
+                            combined_v_arr[c] = ((uint32_t)packed_v_arr[c] << 16) | (neighbor & 0xFFFF);
+                        }
+                        else {
+                            combined_v_arr[c] = (neighbor << 16) | (uint32_t)packed_v_arr[c];
+                        }
                     }
                 }
                 param_K[s][0] = (T)mse_norm;
                 param_K[s][1] = (T)qjl_norm;
                 param_V[s][0] = (T)v_norm;
                 param_V[s][1] = (T)0;
-                // Copy packed results into out_K/out_V (reinterpret from uint4_t/uint2_t to Tkv)
-                PRAGMA_UNROLL
-                for (int c = 0; c < ITER_C; ++c) {
-                    (Array<typename Trait::StorageK, kVecSize>&)out_K[s][c] = qk[c];
-                    if constexpr (HAS_V) {
-                        (Array<typename Trait::StorageV, kVecSize>&)out_V[s][c] = qv[c];
-                    }
-                }
-            }
-            // Skip affine quantization for TurboQuant
-            // Store directly to block cache (bypass out_K/out_V due to SubBytePtr compatibility)
-            PRAGMA_UNROLL
-            for (int s = 0; s < ITER_S; ++s) {
+                // Store packed data + params to block cache
                 const int qi = offset.y + s * Map::kDeltaS + token_idx;
                 const int ti = history_len + qi;
                 int       lti, lti_rank;
@@ -331,36 +348,29 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                         PRAGMA_UNROLL
                         for (int c = 0; c < ITER_C; ++c) {
                             int di = offset.x + c * Map::kDeltaC;
-                            // Write packed K: reinterpret out_K as uint32_t, write to raw pointer
-                            // SubBytePtr<uint4_t>[di] = base + di*4/8 = base + di/2
-                            if constexpr (Trait::kBitsK < 8) {
-                                const uint32_t pk = reinterpret_cast<uint32_t&>(out_K[s][c]);
-                                *reinterpret_cast<uint32_t*>(k_cache.ptr_ + di * Trait::kBitsK / 8) = pk;
-                            }
-                            else {
-                                Store(&k_cache[di], out_K[s][c]);
-                            }
+                            Store(&k_cache[di], (const Array<TK, kVecSize>&)packed_k_arr[c]);
                             if constexpr (HAS_V) {
-                                // Write packed V: reinterpret out_V as uint16_t
                                 if constexpr (Trait::kBitsV < 8) {
-                                    const uint16_t pv = reinterpret_cast<uint16_t&>(out_V[s][c]);
-                                    *reinterpret_cast<uint16_t*>(v_cache.ptr_ + di * Trait::kBitsV / 8) = pv;
+                                    // 16× packing: only even C-dim threads write the combined word
+                                    if ((lane_id & 1) == 0) {
+                                        Store(&v_cache[di], (const Array<TV, 16>&)combined_v_arr[c]);
+                                    }
                                 }
                                 else {
-                                    Store(&v_cache[di], out_V[s][c]);
+                                    Store(&v_cache[di], (const Array<TV, kVecSize>&)packed_v_arr[c]);
                                 }
                             }
                         }
                         if (offset.x == 0) {
-                            StoreQuantParam<Tkv>(k_param, param_K[s]);
+                            Store(k_param, param_K[s]);
                             if constexpr (HAS_V) {
-                                StoreQuantParam<Tkv>(v_param, param_V[s]);
+                                Store(v_param, param_V[s]);
                             }
                         }
                     });
                 }
             }
-            return;  // TurboQuant path fully handled
+            return;
         }
         else {
             // Affine quantization path (kQuantKV but no Hadamard)
@@ -384,9 +394,9 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
         for (int s = 0; s < ITER_S; ++s) {
             PRAGMA_UNROLL
             for (int c = 0; c < ITER_C; ++c) {
-                out_K[s][c] = (Array<Tkv, kVecSize>&)vec_K[s][c];
+                out_K[s][c] = (Array<TK, kVecSize>&)vec_K[s][c];
                 if constexpr (HAS_V) {
-                    out_V[s][c] = (Array<Tkv, kVecSize>&)vec_V[s][c];
+                    out_V[s][c] = (Array<TV, kVecSize>&)vec_V[s][c];
                 }
             }
         }
@@ -413,9 +423,9 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                 }
                 if constexpr (kQuantKV && !Trait::kHadamardRotate) {
                     if (offset.x == 0) {
-                        StoreQuantParam<Tkv>(k_param, param_K[s]);
+                        StoreQuantParam<TK>(k_param, param_K[s]);
                         if constexpr (HAS_V) {
-                            StoreQuantParam<Tkv>(v_param, param_V[s]);
+                            StoreQuantParam<TV>(v_param, param_V[s]);
                         }
                     }
                 }
@@ -568,7 +578,8 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
                                                     BlockLayout     block_layout)
 {
     using Trait = attention::KvQuantTrait<KvQuant, T>;
-    using Tkv   = typename Trait::StorageK;
+    using TK    = typename Trait::StorageK;
+    using TV    = typename Trait::StorageV;
 
     constexpr bool kQuantKV = Trait::kQuantKV;
 
@@ -600,11 +611,28 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
 
     const int2 offset = Map::get_offset(warp_id, lane_id);
 
-    Array<Tkv, kVecSize> __align__(16) vec_K[ITER_S][ITER_C];
-    Array<Tkv, kVecSize> __align__(16) vec_V[ITER_S][ITER_C];
+    Array<TK, kVecSize> __align__(16) vec_K[ITER_S][ITER_C];
+    // For sub-byte V types with 16× packing, each read covers 16 elements (one uint32_t word).
+    // For other types, kVecSize elements per read.
+    static constexpr int kVVecSize =
+        (Trait::kBitsV < 8) ? (sizeof(typename detail::__storage_of<TV>::type) * 8 / Trait::kBitsV) : kVecSize;
+    Array<TV, kVVecSize> __align__(16) vec_V[ITER_S][ITER_C];
 
     Array<T, kVecSize> __align__(16) out_K[ITER_S][ITER_C];
     Array<T, kVecSize> __align__(16) out_V[ITER_S][ITER_C];
+
+    // Zero-initialize output arrays (TurboQuant path may skip slots)
+    PRAGMA_UNROLL
+    for (int s = 0; s < ITER_S; ++s) {
+        PRAGMA_UNROLL
+        for (int c = 0; c < ITER_C; ++c) {
+            PRAGMA_UNROLL
+            for (int j = 0; j < kVecSize; ++j) {
+                out_K[s][c][j] = (T)0.f;
+                out_V[s][c][j] = (T)0.f;
+            }
+        }
+    }
 
     blocks += cu_block_num[batch_idx];
 
@@ -615,11 +643,11 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
 
     int local_ti, local_ti_rank;
 
-    // TurboQuant read path: complete dequantize + inv Hadamard inline, then return
+    // TurboQuant read path: read packed data from block cache, dequantize, inv-Hadamard
     if constexpr (Trait::kHadamardRotate) {
-        const float sigma = 1.f / sqrtf((float)HeadDim);
-        const float had_scale = 1.0f / sqrtf((float)HeadDim);
-        const int kShuffleStages = (HeadDim >= 256) ? 5 : (HeadDim >= 128) ? 4 : 3;
+        const float sigma          = 1.f / sqrtf((float)HeadDim);
+        const float had_scale      = 1.0f / sqrtf((float)HeadDim);
+        const int   kShuffleStages = (HeadDim >= 256) ? 5 : (HeadDim >= 128) ? 4 : 3;
 
         PRAGMA_UNROLL
         for (int s = 0; s < ITER_S; ++s) {
@@ -639,36 +667,29 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
                     PRAGMA_UNROLL
                     for (int c = 0; c < ITER_C; ++c) {
                         int di = offset.x + c * Map::kDeltaC;
-                        // Read K packed data directly from SubBytePtr raw pointer
-                        uint32_t packed_k;
-                        if constexpr (Trait::kBitsK < 8) {
-                            packed_k = *reinterpret_cast<uint32_t*>(k_cache.ptr_ + di * Trait::kBitsK / 8);
-                        }
-                        else {
-                            Ldg(reinterpret_cast<Array<uint4_t, kVecSize>&>(packed_k), &k_cache[di]);
-                        }
-                        // Dequantize K: QJL4 → rotated domain
+                        // Read K packed data
+                        Ldg(vec_K[s][c], &k_cache[di]);
+                        const uint32_t packed_k = reinterpret_cast<const uint32_t&>(vec_K[s][c]);
+                        // Dequantize K: QJL4 codebook → rotated domain
                         PRAGMA_UNROLL
                         for (int j = 0; j < kVecSize; ++j) {
-                            uint8_t nibble = (packed_k >> (j * 4)) & 0xF;
-                            int idx3     = nibble & 0x7;
-                            int sign_bit = (nibble >> 3) & 0x1;
-                            float centroid = attention::dequantize_k4_mse(idx3, sigma);
-                            float sign_val = sign_bit * 2.f - 1.f;
-                            out_K[s][c][j] = (T)(mse_norm * (centroid + qjl_norm * sign_val));
+                            uint8_t nibble   = (packed_k >> (j * 4)) & 0xF;
+                            int     idx3     = nibble & 0x7;
+                            int     sign_bit = (nibble >> 3) & 0x1;
+                            float   centroid = attention::dequantize_k4_mse(idx3, sigma);
+                            float   sign_val = sign_bit * 2.f - 1.f;
+                            out_K[s][c][j]   = (T)(mse_norm * (centroid + qjl_norm * sign_val));
                         }
-                        // Read + dequantize V: 2-bit
+                        // Read + dequantize V: 2-bit codebook
                         if constexpr (HAS_V) {
-                            uint16_t packed_v;
-                            if constexpr (Trait::kBitsV < 8) {
-                                packed_v = *reinterpret_cast<uint16_t*>(v_cache.ptr_ + di * Trait::kBitsV / 8);
-                            }
-                            else {
-                                Ldg(reinterpret_cast<Array<uint2_t, kVecSize>&>(packed_v), &v_cache[di]);
-                            }
+                            // 16× packing: read full uint32_t word, extract relevant 8-value half
+                            Ldg(vec_V[s][c], &v_cache[di]);
+                            const uint32_t packed_v_word = reinterpret_cast<const uint32_t&>(vec_V[s][c]);
+                            const uint16_t packed_v =
+                                (lane_id & 1) ? (uint16_t)(packed_v_word >> 16) : (uint16_t)(packed_v_word & 0xFFFF);
                             PRAGMA_UNROLL
                             for (int j = 0; j < kVecSize; ++j) {
-                                int idx2 = (packed_v >> (j * 2)) & 0x3;
+                                int   idx2     = (packed_v >> (j * 2)) & 0x3;
                                 float centroid = attention::dequantize_v2(idx2, sigma);
                                 out_V[s][c][j] = (T)(v_norm * centroid);
                             }
@@ -702,12 +723,12 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
                 }
                 PRAGMA_UNROLL
                 for (int stg = 0; stg < kShuffleStages; ++stg) {
-                    const int mask = 1 << stg;
+                    const int   mask = 1 << stg;
                     const float sign = (lane_id & mask) ? -1.f : 1.f;
                     PRAGMA_UNROLL
                     for (int j = 0; j < kVecSize; ++j) {
                         float other = __shfl_xor_sync(uint32_t(-1), fval_k[j], mask);
-                        fval_k[j] = sign * fval_k[j] + other;
+                        fval_k[j]   = sign * fval_k[j] + other;
                     }
                 }
                 PRAGMA_UNROLL
@@ -735,12 +756,12 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
                     }
                     PRAGMA_UNROLL
                     for (int stg = 0; stg < kShuffleStages; ++stg) {
-                        const int mask = 1 << stg;
+                        const int   mask = 1 << stg;
                         const float sign = (lane_id & mask) ? -1.f : 1.f;
                         PRAGMA_UNROLL
                         for (int j = 0; j < kVecSize; ++j) {
                             float other = __shfl_xor_sync(uint32_t(-1), fval_v[j], mask);
-                            fval_v[j] = sign * fval_v[j] + other;
+                            fval_v[j]   = sign * fval_v[j] + other;
                         }
                     }
                     PRAGMA_UNROLL
@@ -849,7 +870,8 @@ void invokeFlattenKV_v2(T*                     k,
 
     auto invoke = [&](auto kv_quant, const auto dim) {
         using KvQuantT = decltype(kv_quant);
-        using Tkv      = typename attention::KvQuantTrait<KvQuantT, T>::StorageK;
+        using TK       = typename attention::KvQuantTrait<KvQuantT, T>::StorageK;
+        using TV       = typename attention::KvQuantTrait<KvQuantT, T>::StorageV;
 
         constexpr int  kHeadDim = dim;
         constexpr bool kShareKV = kHeadDim == 576;

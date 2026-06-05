@@ -149,10 +149,8 @@ struct KvQuantTrait<KvQuantInt4, T> {
 
 template<class T>
 struct KvQuantTrait<KvQuantTurbo, T> {
-    // K: 4-bit QJL4 — 3-bit Lloyd-Max index + 1-bit QJL sign, packed as nibble
-    using StorageK = uint4_t;
-    // V: 2-bit Lloyd-Max MSE, 4 values packed per uint8_t
-    using StorageV = uint2_t;
+    using StorageK = uint4_t;  // K: 4-bit QJL4
+    using StorageV = uint2_t;  // V: 2-bit MSE codebook (packed in block cache)
 
     using PointerK = SubBytePtr<uint4_t>;
     using PointerV = SubBytePtr<uint2_t>;
@@ -162,9 +160,8 @@ struct KvQuantTrait<KvQuantTurbo, T> {
 
     static constexpr bool kQuantKV = true;
 
-    // K: [mse_norm, qjl_norm], V: [norm, unused=0]
-    static constexpr int kParamCountK = 2;
-    static constexpr int kParamCountV = 2;
+    static constexpr int kParamCountK = 2;  // [mse_norm, qjl_norm]
+    static constexpr int kParamCountV = 2;  // [norm, unused=0]
 
     static constexpr int kv_quant = 42;
 

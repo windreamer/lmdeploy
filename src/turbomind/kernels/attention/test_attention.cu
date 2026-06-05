@@ -41,16 +41,21 @@ struct Config {
         }
     }
 
-    TM_HOST_DEVICE constexpr int q_bits() const
+    TM_HOST_DEVICE constexpr int k_bits() const
     {
         return bitsof<Tkv>;
+    }
+
+    TM_HOST_DEVICE constexpr int q_bits() const  // legacy alias for k_bits()
+    {
+        return k_bits();
     }
 
     // TurboQuant: V uses different bit-width than K
     TM_HOST_DEVICE constexpr int v_bits() const
     {
 #if KV_TURBO
-        return 2;  // TurboQuant V=2bit MSE
+        return 2;  // TurboQuant V=2bit
 #else
         return q_bits();  // symmetric by default
 #endif
@@ -294,14 +299,14 @@ int test_attention()
     // constexpr int    kMaxSplitK   = 1;
 
     // prefill
-    constexpr size_t kHeadNum     = 16;
-    constexpr size_t KvHeadNum    = kHeadNum / 8;
-    constexpr size_t kBatchSize   = 2;
-    constexpr size_t kInputLen    = 8192;
+    constexpr size_t kHeadNum = 16;
+    constexpr size_t KvHeadNum = kHeadNum / 8;
+    constexpr size_t kBatchSize = 2;
+    constexpr size_t kInputLen = 8192;
     constexpr size_t kSequenceLen = 0;
-    constexpr int    kMaxSplitK   = 1;
+    constexpr int kMaxSplitK = 1;
 
-    constexpr int kBlockSz     = 64;
+    constexpr int kBlockSz = 64;
 
 #endif
 
@@ -309,7 +314,7 @@ int test_attention()
     using Tkv                  = uint8_t;
     constexpr int kQuantPolicy = QuantPolicy::kCacheKVInt8;
 #elif KV_INT4
-    using Tkv                  = uint4_t;
+    using Tkv = uint4_t;
     constexpr int kQuantPolicy = QuantPolicy::kCacheKVInt4;
 #elif KV_TURBO
     using Tkv                  = uint4_t;  // K=4bit; V=2bit handled via quant_policy dispatch

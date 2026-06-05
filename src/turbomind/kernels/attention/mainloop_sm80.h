@@ -20,7 +20,8 @@ struct Mainloop<Sm80_CpAsync<Stages>, Impl_> {
     using Impl = Impl_;
 
     using T       = typename Impl::T;
-    using Tkv     = typename Impl::Tkv;
+    using TK      = typename Impl::TK;
+    using TV      = typename Impl::TV;
     using KvQuant = typename Impl::KvQuant;
     using Trait   = KvQuantTrait<KvQuant, T>;
 
@@ -29,10 +30,11 @@ struct Mainloop<Sm80_CpAsync<Stages>, Impl_> {
 
     static constexpr int CTA_S = Impl::CTA_S;
 
-    using ThreadMapKV = typename Impl::ThreadMapKV;
+    using ThreadMapK = typename Impl::ThreadMapK;
+    using ThreadMapV = typename Impl::ThreadMapV;
 
-    using GmemIterK_ = Sm80GmemIterator<Tkv, ThreadMapKV, typename Impl::SmemLayoutK, 0>;
-    using GmemIterV_ = Sm80GmemIterator<Tkv, ThreadMapKV, typename Impl::SmemLayoutV, 1>;
+    using GmemIterK_ = Sm80GmemIterator<TK, ThreadMapK, typename Impl::SmemLayoutK, 0>;
+    using GmemIterV_ = Sm80GmemIterator<TV, ThreadMapV, typename Impl::SmemLayoutV, 1>;
 
     /// TODO: hide this behind a SFINAE gate so that `*KVp` stuff won't be needed for non-quantized impls
     using CombinedIterK =
@@ -84,10 +86,10 @@ struct Mainloop<Sm80_CpAsync<Stages>, Impl_> {
     __device__ static void Prefetch(GmemIter gmem_iter, BlockIter& block_iter, int k, int pipe_iter)
     {
         const int begin = k * Batch;
-        if (begin < ThreadMapKV::kIterS) {
+        if (begin < ThreadMapK::kIterS) {
             gmem_iter.Prefetch(false_c, block_iter, begin, Batch, CTA_S, pipe_iter);
         }
-        if (begin + Batch == ThreadMapKV::kIterS) {
+        if (begin + Batch == ThreadMapK::kIterS) {
             if constexpr (Advnace) {
                 block_iter.Advance();
             }

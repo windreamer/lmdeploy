@@ -19,7 +19,8 @@ struct Impl<MMA_884, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP
 
     using T       = T_;
     using KvQuant = KvQuant_;
-    using Tkv     = T_;  // no quantization
+    using TK      = T_;  // no quantization
+    using TV      = T_;  // no quantization
 
     static constexpr bool MLA = false;
 
@@ -117,6 +118,8 @@ struct Impl<MMA_884, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP
                                            RakedThreadMap<HeadDim, CTA_S, 4, kWarpCount, 8>,
                                            RakedThreadMap<HeadDim, CTA_S, 4, kWarpCount>>;
 
+    using ThreadMapK   = ThreadMapKV;
+    using ThreadMapV   = ThreadMapKV;
     using ThreadMapKVp = void;
 
     static constexpr bool kDeferReduceL = true;

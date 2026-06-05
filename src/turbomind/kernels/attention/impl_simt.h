@@ -33,7 +33,8 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
     using KvQuant = KvQuant_;
     using Trait   = KvQuantTrait<KvQuant, T>;
 
-    using Tkv = typename Trait::StorageK;  // backward compat
+    using TK = typename Trait::StorageK;
+    using TV = typename Trait::StorageV;
 
     static constexpr int kQuantKV = Trait::kQuantKV;
 
@@ -85,7 +86,7 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
         static constexpr int S_S_thr = 1;
         static constexpr int S_D     = VEC;
         static constexpr int S_S     = T_S;
-        static constexpr int LDS     = std::gcd(16 / sizeof(Array<Tkv, VEC>), K_K);
+        static constexpr int LDS     = std::gcd(16 / sizeof(Array<TK, VEC>), K_K);
     };
 
     struct LinearD {
@@ -134,8 +135,8 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
 
     static_assert(sizeof(FragP) == sizeof(FragSp));
 
-    using DataK = FragK_<Tkv>;
-    using DataV = FragV_<Tkv>;
+    using DataK = FragK_<TK>;
+    using DataV = FragV_<TV>;
 
     using FragK = FragK_<Tqk>;
     using FragV = FragV_<Tpv>;
@@ -154,13 +155,15 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
     using SmemO = Array<float, 4>[V_M][V_N][2][kWarpCntH][kWarpCntS][T_D];  // (Qm, Dn, d2, Hw, Sw, d8), (d4)
                                                                             //   1  64   4  WH  WS   8     1
 
-    using PointerKV = typename Trait::PointerK;
+    using PointerK = typename Trait::PointerK;
+    using PointerV = typename Trait::PointerV;
 
     union SharedStorage {
         __align__(16) T Q[SmemLayoutQ::kSize];
 
         struct {
-            __align__(16) Array<Tkv, Stages * SmemLayoutK::kSize> KV;
+            __align__(16) Array<TK, Stages * SmemLayoutK::kSize> K;
+            __align__(16) Array<TV, Stages * SmemLayoutV::kSize> V;
             __align__(16) T KVp[Stages * SmemLayoutKVp::kSize];
         };
 
@@ -174,13 +177,14 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
     static constexpr bool kUseSmemQ = false;
     static constexpr bool kUseSmemP = false;
 
-    using ThreadMapQ  = RakedThreadMap<HeadDim, CTA_H, 8, kWarpCount>;
-    using ThreadMapKV = RakedThreadMap<HeadDim, CTA_S, 128 / Trait::kBitsK, kWarpCount>;
+    using ThreadMapQ = RakedThreadMap<HeadDim, CTA_H, 8, kWarpCount>;
+    using ThreadMapK = RakedThreadMap<HeadDim, CTA_S, 128 / Trait::kBitsK, kWarpCount>;
+    using ThreadMapV = RakedThreadMap<HeadDim, CTA_S, 128 / Trait::kBitsV, kWarpCount>;
     // `WARP_SIZE / WARP_S` is chosen to achieve minimum kIterS w/o introducing partial S iter
     using ThreadMapKVp = RakedThreadMap<2, CTA_S, 2, kWarpCount, WARP_SIZE / WARP_S>;
 
-    static constexpr int kBatchK = ThreadMapKV::kIterS;
-    static constexpr int kBatchV = ThreadMapKV::kIterS;
+    static constexpr int kBatchK = ThreadMapK::kIterS;
+    static constexpr int kBatchV = ThreadMapV::kIterS;
 
     __device__ static void Sync()
     {
@@ -197,12 +201,12 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
     {
         int pred = offset_kv;
         if constexpr (kQuantKV) {
-            gmem_K.SetSmem(storage.KV.data(), storage.KVp);
-            gmem_V.SetSmem(storage.KV.data() + pred * SmemLayoutK::kSize, storage.KVp + pred * SmemLayoutKVp::kSize);
+            gmem_K.SetSmem(storage.K.data(), storage.KVp);
+            gmem_V.SetSmem(storage.V.data(), storage.KVp + pred * SmemLayoutKVp::kSize);
         }
         else {
-            gmem_K.SetSmem(storage.KV.data());
-            gmem_V.SetSmem(storage.KV.data() + pred * SmemLayoutK::kSize);
+            gmem_K.SetSmem(storage.K.data());
+            gmem_V.SetSmem(storage.V.data() + pred * SmemLayoutK::kSize);
         }
     }
 
@@ -268,16 +272,16 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
     }
 
     struct StateQK {
-        PointerKV smem_K;
-        T*        smem_K_param;
-        FragQ     frag_Q;
-        FragK     frag_K;
-        DataK     data_K;
-        ParamK    param_K;
+        PointerK smem_K;
+        T*       smem_K_param;
+        FragQ    frag_Q;
+        FragK    frag_K;
+        DataK    data_K;
+        ParamK   param_K;
 
         __device__ StateQK(SharedStorage& storage, FragQ frag_Q_)
         {
-            smem_K       = storage.KV.data();
+            smem_K       = storage.K.data();
             smem_K_param = storage.KVp;
             if constexpr (!kUseSmemQ) {
                 PRAGMA_UNROLL
@@ -310,7 +314,7 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
             for (int k = 0; k < K_K; k += LDS_K) {
                 const int si = n * S_S + offset_s;
                 const int di = k * S_D + offset_c;
-                Lds((Array<Tkv, VEC * LDS_K>&)data_K[n][k],
+                Lds((Array<TK, VEC * LDS_K>&)data_K[n][k],
                     &smem_K[pipe_iter * SmemLayoutK::kSize + SmemLayoutK::apply(si, di)]);
             }
         }
@@ -319,7 +323,7 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
         {
             PRAGMA_UNROLL
             for (int k = 0; k < K_K; ++k) {
-                auto          unpacked = ConvertKvCache<Tkv, Tqk>::convert(data_K[n][k]);
+                auto          unpacked = ConvertKvCache<TK, Tqk>::convert(data_K[n][k]);
                 constexpr int kLen     = sizeof(unpacked) / sizeof(Tqk);
                 PRAGMA_UNROLL
                 for (int i = 0; i < kLen; ++i) {
@@ -381,16 +385,16 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
     }
 
     struct StatePV {
-        PointerKV smem_V;
-        T*        smem_V_param;
-        FragP     frag_P;
-        FragV     frag_V;
-        DataV     data_V;
-        ParamV    param_V;
+        PointerV smem_V;
+        T*       smem_V_param;
+        FragP    frag_P;
+        FragV    frag_V;
+        DataV    data_V;
+        ParamV   param_V;
 
         __device__ StatePV(SharedStorage& storage, bool offset = false)
         {
-            smem_V       = storage.KV.data() + (offset ? SmemLayoutK::kSize : 0);
+            smem_V       = storage.V.data() + (offset ? SmemLayoutV::kSize : 0);
             smem_V_param = storage.KVp + (offset ? SmemLayoutKVp::kSize : 0);
         }
 
@@ -414,7 +418,7 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
             for (int n = 0; n < V_N; n += LDS_V) {
                 const int si = k * S_S + offset_s;
                 const int di = n * S_D + offset_c;
-                Lds((Array<Tkv, VEC * LDS_V>&)data_V[k][n],
+                Lds((Array<TV, VEC * LDS_V>&)data_V[k][n],
                     &smem_V[pipe_iter * SmemLayoutV::kSize + SmemLayoutV::apply(si, di)]);
             }
         }
@@ -423,7 +427,7 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
         {
             PRAGMA_UNROLL
             for (int n = 0; n < V_N; ++n) {
-                auto          unpacked = ConvertKvCache<Tkv, Tpv>::convert(data_V[k][n]);
+                auto          unpacked = ConvertKvCache<TV, Tpv>::convert(data_V[k][n]);
                 constexpr int kLen     = sizeof(unpacked) / sizeof(Tpv);
                 PRAGMA_UNROLL
                 for (int i = 0; i < kLen; ++i) {

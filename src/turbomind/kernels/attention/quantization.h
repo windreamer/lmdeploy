@@ -910,10 +910,15 @@ struct ConvertKvCache<half, uint2_t> {
     }
 };
 
-// uint2_t → half: bit unpack from raw bytes
-// Array<uint2_t, N> underlying storage is ceil(N*2/8) bytes.
-// For N=8: one uint16_t, for N=16: one uint32_t, etc.
-// We unpack directly from the raw bits.
+// uint2_t → half: SIMD-optimized bit unpack from 16× packed words
+//
+// Uses the FP16 magic number trick: FP16(1024 + x) for small integer x
+// has the integer value in the bottom mantissa bits, so
+// FP16(1024 + x) - FP16(1024) = FP16(x).
+//
+// Each uint32_t word contains 16 two-bit indices.
+// We extract consecutive pairs (2i, 2i+1) into f16x2 slots,
+// apply magic+subtract, producing 8 f16x2 values = 16 half values.
 template<>
 struct ConvertKvCache<uint2_t, half> {
     half scale_;
@@ -921,20 +926,48 @@ struct ConvertKvCache<uint2_t, half> {
 
     __device__ ConvertKvCache(half scale, half zero): scale_{scale}, zero_{zero} {}
 
+    // Core: convert one uint32_t (16 packed 2-bit values) → 16 half values
+    static __device__ __forceinline__ Array<half, 16> cvt_f16x16_u2(uint32_t packed)
+    {
+        static constexpr uint32_t MAGIC = 0x64006400u;
+        // immLut=0xEA computes (a & b) | c: inserts 2-bit index into FP16(1024) magic
+        Array<uint32_t, 8> h;
+
+        PRAGMA_UNROLL
+        for (int i = 0; i < 8; ++i) {
+            uint32_t x = packed >> (i * 4);
+            uint32_t lo, hi;
+            asm volatile("lop3.b32 %0, %1, 0x3, 0x6400, 0xEA;\n" : "=r"(lo) : "r"(x));
+            asm volatile("lop3.b32 %0, %1, 0x00030000, 0x64000000, 0xEA;\n" : "=r"(hi) : "r"(x << 14));
+            h[i] = lo | hi;
+        }
+
+        PRAGMA_UNROLL
+        for (int i = 0; i < 8; ++i) {
+            asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h[i]) : "r"(h[i]), "r"(MAGIC));
+        }
+
+        return reinterpret_cast<const Array<half, 16>&>(h);
+    }
+
+    // Convenience overload from Array<uint2_t, 16>
+    static __device__ __forceinline__ Array<half, 16> cvt_f16x16_u2(const Array<uint2_t, 16>& vi)
+    {
+        return cvt_f16x16_u2(*reinterpret_cast<const uint32_t*>(&vi));
+    }
+
     template<int N>
     __device__ static auto convert(const Array<uint2_t, N>& vi)
     {
+        static_assert(N % 16 == 0, "N must be a multiple of 16 for 16x packing");
         Array<half, N> vo;
-        // N elements of 2-bit = N*2 bits = N/4 bytes
-        // We process 8 elements at a time (2 bytes = 1 uint16_t)
         PRAGMA_UNROLL
-        for (int i = 0; i < N; i += 8) {
-            // Reinterpret 8 x uint2_t as uint16_t
-            const uint16_t packed = reinterpret_cast<const uint16_t&>(vi[i]);
+        for (int i = 0; i < N; i += 16) {
+            const uint32_t packed = reinterpret_cast<const uint32_t&>(vi[i]);
+            auto           r      = cvt_f16x16_u2(packed);
             PRAGMA_UNROLL
-            for (int j = 0; j < 8; ++j) {
-                int idx2 = (packed >> (j * 2)) & 0x3;
-                vo[i + j] = __int2half_rn(idx2);
+            for (int j = 0; j < 16; ++j) {
+                vo[i + j] = r[j];
             }
         }
         return vo;
@@ -943,12 +976,27 @@ struct ConvertKvCache<uint2_t, half> {
     template<int N>
     __device__ auto operator()(const Array<uint2_t, N>& vi) const -> Array<half, N>
     {
-        // For TurboQuant: only convert() is used (bit-unpack),
-        // DequantV::apply() handles the actual dequantization.
-        // The affine path (scale*val+zero) is incorrect for codebook quantization.
-        // We still provide operator() for API compatibility, but it should
-        // not be used in TurboQuant paths.
         return convert(vi);
+    }
+};
+
+// uint2_t -> bfloat16: delegate to half then cast
+template<>
+struct ConvertKvCache<uint2_t, nv_bfloat16> {
+    ConvertKvCache<uint2_t, half> impl_;
+
+    __device__ ConvertKvCache(nv_bfloat16 scale, nv_bfloat16 zero): impl_{(half)scale, (half)zero} {}
+
+    template<int N>
+    __device__ static auto convert(const Array<uint2_t, N>& vi)
+    {
+        return cast<nv_bfloat16>(ConvertKvCache<uint2_t, half>::convert(vi));
+    }
+
+    template<int N>
+    __device__ auto operator()(const Array<uint2_t, N>& vi) const
+    {
+        return cast<nv_bfloat16>(impl_(vi));
     }
 };
 

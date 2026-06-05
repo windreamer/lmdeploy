@@ -40,7 +40,8 @@ struct Impl<MMA_1688, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP
 
     using T       = T_;
     using KvQuant = KvQuant_;
-    using Tkv     = T_;  // no quantization
+    using TK      = T_;  // no quantization
+    using TV      = T_;  // no quantization
 
     static constexpr int kHeadDim = HeadDim;
 
@@ -81,8 +82,8 @@ struct Impl<MMA_1688, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP
     union SharedStorage {
         __align__(16) T Q[SmemLayoutQ::kSize];
         struct {
-            __align__(16) Tkv K[SmemLayoutK::kSize];
-            __align__(16) Tkv V[SmemLayoutV::kSize];
+            __align__(16) TK K[SmemLayoutK::kSize];
+            __align__(16) TV V[SmemLayoutV::kSize];
         };
     };
 
@@ -91,6 +92,8 @@ struct Impl<MMA_1688, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP
     using ThreadMapQ  = RakedThreadMap<HeadDim, CTA_Q * CTA_H, 8, kWarpCount>;
     using ThreadMapKV = RakedThreadMap<HeadDim, CTA_S, 8, kWarpCount>;
 
+    using ThreadMapK   = ThreadMapKV;
+    using ThreadMapV   = ThreadMapKV;
     using ThreadMapKVp = void;
 
     __device__ static void Sync()

@@ -50,7 +50,8 @@ struct Impl<MMA_16816, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WAR
 
     using T       = T_;
     using KvQuant = KvQuant_;
-    using Tkv     = T_;  // no quantization
+    using TK      = T_;  // no quantization
+    using TV      = T_;  // no quantization
 
     static constexpr int kHeadDim = HeadDim;
 
@@ -103,6 +104,8 @@ struct Impl<MMA_16816, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WAR
     using ThreadMapQ  = RakedThreadMap<HeadDim, CTA_Q * CTA_H, 8, kWarpCount>;
     using ThreadMapKV = RakedThreadMap<HeadDim, CTA_S, 8, kWarpCount>;
 
+    using ThreadMapK   = ThreadMapKV;
+    using ThreadMapV   = ThreadMapKV;
     using ThreadMapKVp = void;
 
     static constexpr int kBatchK = std::min(4, ThreadMapKV::kIterS);

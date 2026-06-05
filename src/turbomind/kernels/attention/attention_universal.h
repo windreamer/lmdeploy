@@ -35,9 +35,13 @@ namespace turbomind {
 template<typename T, int kAccessC, int HeadDim>
 __device__ void hadamard_register_butterfly(Array<T, kAccessC>& val)
 {
-    constexpr int kLocalStages  = (kAccessC >= 8) ? 3 : (kAccessC >= 4) ? 2 : 1;
-    constexpr int kTotalStages  = /* log2(HeadDim) */
-        (HeadDim >= 256) ? 8 : (HeadDim >= 128) ? 7 : (HeadDim >= 64) ? 6 : (HeadDim >= 32) ? 5 : 4;
+    constexpr int kLocalStages = (kAccessC >= 8) ? 3 : (kAccessC >= 4) ? 2 : 1;
+    constexpr int kTotalStages = /* log2(HeadDim) */
+        (HeadDim >= 256) ? 8 :
+        (HeadDim >= 128) ? 7 :
+        (HeadDim >= 64)  ? 6 :
+        (HeadDim >= 32)  ? 5 :
+                           4;
     constexpr int kShuffleStages = kTotalStages - kLocalStages;
 
     // Convert to float for numerical accuracy (matches standalone Hadamard kernel)
@@ -54,8 +58,8 @@ __device__ void hadamard_register_butterfly(Array<T, kAccessC>& val)
         PRAGMA_UNROLL
         for (int j = 0; j < kAccessC; ++j) {
             if (j & stride) {
-                float a = fval[j - stride];
-                float b = fval[j];
+                float a          = fval[j - stride];
+                float b          = fval[j];
                 fval[j - stride] = a + b;
                 fval[j]          = a - b;
             }
@@ -68,7 +72,7 @@ __device__ void hadamard_register_butterfly(Array<T, kAccessC>& val)
     const int lane_id = threadIdx.x % WARP_SIZE;
     PRAGMA_UNROLL
     for (int s = 0; s < kShuffleStages; ++s) {
-        const int mask   = 1 << s;
+        const int   mask = 1 << s;
         const float sign = (lane_id & mask) ? -1.f : 1.f;
         PRAGMA_UNROLL
         for (int j = 0; j < kAccessC; ++j) {
@@ -93,9 +97,10 @@ template<class Arch_, class Mainloop, class CacheIteratorFactory_, class CtaMap_
 struct AttentionUniversal {
 
     using T       = typename Mainloop::T;
-    using Tkv     = typename Mainloop::Tkv;
     using KvQuant = typename Mainloop::KvQuant;
     using Trait   = attention::KvQuantTrait<KvQuant, T>;
+    using TK      = typename Trait::StorageK;
+    using TV      = typename Trait::StorageV;
 
     using Impl = typename Mainloop::Impl;
 
@@ -358,8 +363,13 @@ struct AttentionUniversal {
 
             if constexpr (!Trait::kHadamardRotate) {
                 // Standard affine quantization write path
-                Array<Tkv, kVecSize> out_K[1][ITER_C];
-                Array<Tkv, kVecSize> out_V[1][ITER_C];
+                // For sub-byte types with 16x packing, kVecSize may not be a valid Array size.
+                // Use the storage-aligned vector size instead.
+                static constexpr int kVVecSize =
+                    (Trait::kBitsV < 8) ? (sizeof(typename detail::__storage_of<TV>::type) * 8 / Trait::kBitsV) :
+                                          kVecSize;
+                Array<TK, kVecSize>  out_K[1][ITER_C];
+                Array<TV, kVVecSize> out_V[1][ITER_C];
 
                 ConvertKvCache<T, typename Trait::StorageK> conv_K{param_K[0][0], param_K[0][1]};
                 ConvertKvCache<T, typename Trait::StorageV> conv_V{param_V[0][0], param_V[0][1]};
@@ -388,9 +398,9 @@ struct AttentionUniversal {
                         }
                         if constexpr (Trait::kQuantKV) {
                             if (qi < CTA_Q && offset.x == 0) {
-                                StoreQuantParam<Tkv>(k_param, param_K[0]);
+                                StoreQuantParam<TK>(k_param, param_K[0]);
                                 if constexpr (HAS_V) {
-                                    StoreQuantParam<Tkv>(v_param, param_V[0]);
+                                    StoreQuantParam<TV>(v_param, param_V[0]);
                                 }
                             }
                         }
@@ -428,39 +438,32 @@ struct AttentionUniversal {
                     sum_k_sq += __shfl_xor_sync(uint32_t(-1), sum_k_sq, mask);
                     sum_v_sq += __shfl_xor_sync(uint32_t(-1), sum_v_sq, mask);
                 }
-                const float mse_norm = sqrtf(sum_k_sq);
-                const float v_norm   = sqrtf(sum_v_sq);
+                const float mse_norm     = sqrtf(sum_k_sq);
+                const float v_norm       = sqrtf(sum_v_sq);
                 const float inv_mse_norm = (mse_norm > 0.f) ? 1.f / mse_norm : 0.f;
                 const float inv_v_norm   = (v_norm > 0.f) ? 1.f / v_norm : 0.f;
 
                 // 3. Normalize + 3-bit MSE quantize K + compute residual
-                const float sigma_k = 1.f / sqrtf((float)kHeadDim);
-                const float sigma_v = sigma_k;
-                float residual_sq_sum = 0.f;
+                const float sigma_k         = 1.f / sqrtf((float)kHeadDim);
+                const float sigma_v         = sigma_k;
+                float       residual_sq_sum = 0.f;
 
                 // Quantize K: QJL4 = 3-bit MSE index + 1-bit QJL sign, packed as 4-bit nibble
-                // Pack 8 nibbles into a uint32_t (same layout as ConvertKvCache<uint4_t>::pack)
-                Array<uint4_t, kVecSize> out_K[ITER_C];
+                uint32_t packed_k[ITER_C];
                 PRAGMA_UNROLL
                 for (int c = 0; c < ITER_C; ++c) {
-                    uint8_t nibbles[kVecSize];
+                    uint32_t packed = 0;
                     PRAGMA_UNROLL
                     for (int j = 0; j < kVecSize; ++j) {
-                        float y = (float)vec_K[0][c][j] * inv_mse_norm;
-                        int   idx3 = attention::quantize_k4_mse(y, sigma_k);
+                        float y        = (float)vec_K[0][c][j] * inv_mse_norm;
+                        int   idx3     = attention::quantize_k4_mse(y, sigma_k);
                         float centroid = attention::dequantize_k4_mse(idx3, sigma_k);
                         float residual = y - centroid;
                         int   sign_bit = (residual >= 0.f) ? 1 : 0;
                         residual_sq_sum += residual * residual;
-                        nibbles[j] = (uint8_t)(idx3 | (sign_bit << 3));
+                        packed |= ((uint32_t)(idx3 | (sign_bit << 3)) << (j * 4));
                     }
-                    // Pack 8 nibbles into uint32_t (4 bytes), matching SubBytePtr<uint4_t> layout
-                    uint32_t packed = 0;
-                    PRAGMA_UNROLL
-                    for (int j = 0; j < kVecSize; ++j) {
-                        packed |= ((uint32_t)nibbles[j] << (j * 4));
-                    }
-                    out_K[c] = (Array<uint4_t, kVecSize>&)packed;
+                    packed_k[c] = packed;
                 }
 
                 // QJL norm: sqrt(sum_residual^2 / d), warp-reduced
@@ -471,18 +474,33 @@ struct AttentionUniversal {
                 const float qjl_norm = sqrtf(residual_sq_sum / (float)kHeadDim);
 
                 // 4. Quantize V: 2-bit MSE, pack 8 indices into uint16_t
-                Array<uint2_t, kVecSize> out_V[ITER_C];
+                uint16_t packed_v[ITER_C];
                 if constexpr (HAS_V) {
                     PRAGMA_UNROLL
                     for (int c = 0; c < ITER_C; ++c) {
-                        uint16_t packed_v = 0;
+                        uint16_t pv = 0;
                         PRAGMA_UNROLL
                         for (int j = 0; j < kVecSize; ++j) {
-                            float u   = (float)vec_V[0][c][j] * inv_v_norm;
+                            float u    = (float)vec_V[0][c][j] * inv_v_norm;
                             int   idx2 = attention::quantize_v2(u, sigma_v);
-                            packed_v |= ((uint16_t)idx2 << (j * 2));
+                            pv |= ((uint16_t)idx2 << (j * 2));
                         }
-                        out_V[c] = (Array<uint2_t, kVecSize>&)packed_v;
+                        packed_v[c] = pv;
+                    }
+                }
+
+                // Warp shuffle for 16x packed V: combine even/odd thread pairs into uint32_t words
+                uint32_t combined_v[ITER_C];
+                if constexpr (HAS_V && Trait::kBitsV < 8) {
+                    PRAGMA_UNROLL
+                    for (int c = 0; c < ITER_C; ++c) {
+                        uint32_t neighbor = __shfl_xor_sync(uint32_t(-1), (uint32_t)packed_v[c], 1);
+                        if (lane_id & 1) {
+                            combined_v[c] = ((uint32_t)packed_v[c] << 16) | (neighbor & 0xFFFF);
+                        }
+                        else {
+                            combined_v[c] = (neighbor << 16) | (uint32_t)packed_v[c];
+                        }
                     }
                 }
 
@@ -501,16 +519,27 @@ struct AttentionUniversal {
                         for (int c = 0; c < ITER_C; ++c) {
                             const int di = offset.x + c * Map::kDeltaC;
                             if (qi < CTA_Q) {
-                                Store(&k_cache[di], out_K[c]);
+                                // Direct raw pointer write for SubBytePtr types
+                                *reinterpret_cast<uint32_t*>(k_cache.ptr_ + di * Trait::kBitsK / 8) = packed_k[c];
                                 if constexpr (HAS_V) {
-                                    Store(&v_cache[di], out_V[c]);
+                                    if constexpr (Trait::kBitsV < 8) {
+                                        // 16x packing: only even C-dim threads write the combined word
+                                        if ((lane_id & 1) == 0) {
+                                            Store(&v_cache[di], (const Array<TV, 16>&)combined_v[c]);
+                                        }
+                                    }
+                                    else {
+                                        *reinterpret_cast<uint16_t*>(v_cache.ptr_ + di * Trait::kBitsV / 8) =
+                                            packed_v[c];
+                                    }
                                 }
                             }
                         }
                         if (qi < CTA_Q && offset.x == 0) {
-                            StoreQuantParam<Tkv>(k_param, param_K[0]);
+                            // TurboQuant params are [norm, qjl_norm/0], not affine — Store directly
+                            Store(k_param, param_K[0]);
                             if constexpr (HAS_V) {
-                                StoreQuantParam<Tkv>(v_param, param_V[0]);
+                                Store(v_param, param_V[0]);
                             }
                         }
                     });
@@ -729,7 +758,11 @@ struct AttentionUniversal {
             }
         }
 
-        if (iter_begin == 0 && iter_end == tile_count && params.cp_size == 1) {
+        // TurboQuant always needs StorePartial because the reduce kernel applies
+        // the output Hadamard rotation — even when split_cnt==1 and cp_size==1.
+        const bool is_turbo_quant = params.quant_policy == 42;
+
+        if (iter_begin == 0 && iter_end == tile_count && params.cp_size == 1 && !is_turbo_quant) {
             StoreO(frag_O, frag_L, qi_begin, qi_end, head_idx, params, storage);
         }
         else {
