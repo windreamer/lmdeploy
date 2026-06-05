@@ -8,6 +8,7 @@ add_library(attention STATIC
             kv_cache_utils_v2.cu
             cp_utils.cu
             registry.cu
+            hadamard_kernel.cu
             )
 set_property(TARGET attention PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET attention PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
