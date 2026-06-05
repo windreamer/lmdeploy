@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cstdint>
 #include <cuda_runtime.h>
 
@@ -35,5 +37,20 @@ struct HadamardParams {
 void hadamard_transform_fp16(HadamardParams& params, cudaStream_t stream);
 void hadamard_transform_bf16(HadamardParams& params, cudaStream_t stream);
 void hadamard_transform_fp32(HadamardParams& params, cudaStream_t stream);
+
+// Template convenience wrapper — dispatches to the correct type-specific function.
+template<class T>
+void hadamard_transform(HadamardParams& params, cudaStream_t stream)
+{
+    if constexpr (std::is_same_v<T, half>) {
+        hadamard_transform_fp16(params, stream);
+    }
+    else if constexpr (std::is_same_v<T, nv_bfloat16>) {
+        hadamard_transform_bf16(params, stream);
+    }
+    else {
+        hadamard_transform_fp32(params, stream);
+    }
+}
 
 }  // namespace turbomind
