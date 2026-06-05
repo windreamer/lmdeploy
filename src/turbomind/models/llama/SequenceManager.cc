@@ -104,13 +104,18 @@ SequenceManager::SequenceManager(int                     head_dim,
     const int dbits     = byte_size(runtime_dtype, 8);
     const int elem_bits = quant_policy ? quant_policy : dbits;
 
+    // TurboQuant: K=4bit QJL4, V=2bit MSE (asymmetric)
+    const bool is_turbo_quant = (quant_policy == 42);
+    const int  k_bits = is_turbo_quant ? 4 : elem_bits;
+    const int  v_bits = is_turbo_quant ? 2 : 0;  // 0 means same as k_bits
+
     BlockConfig block_config{
         head_dim,
         kv_head_num,
         cache_block_seq_len,
         elem_bits == dbits ? 0 : dbits,
-        elem_bits,
-        0,                // v_bits (0 = same as q_bits)
+        k_bits,
+        v_bits,
         0,                // k_param_count (0 = default 2)
         0,                // v_param_count (0 = default 2)
         head_dim == 576,  // share kv
