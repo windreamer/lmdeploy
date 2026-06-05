@@ -910,7 +910,10 @@ struct ConvertKvCache<half, uint2_t> {
     }
 };
 
-// uint2_t → half: bit unpack to integer half
+// uint2_t → half: bit unpack from raw bytes
+// Array<uint2_t, N> underlying storage is ceil(N*2/8) bytes.
+// For N=8: one uint16_t, for N=16: one uint32_t, etc.
+// We unpack directly from the raw bits.
 template<>
 struct ConvertKvCache<uint2_t, half> {
     half scale_;
@@ -922,9 +925,17 @@ struct ConvertKvCache<uint2_t, half> {
     __device__ static auto convert(const Array<uint2_t, N>& vi)
     {
         Array<half, N> vo;
+        // N elements of 2-bit = N*2 bits = N/4 bytes
+        // We process 8 elements at a time (2 bytes = 1 uint16_t)
         PRAGMA_UNROLL
-        for (int i = 0; i < N; ++i) {
-            vo[i] = __int2half_rn((int)vi[i]);
+        for (int i = 0; i < N; i += 8) {
+            // Reinterpret 8 x uint2_t as uint16_t
+            const uint16_t packed = reinterpret_cast<const uint16_t&>(vi[i]);
+            PRAGMA_UNROLL
+            for (int j = 0; j < 8; ++j) {
+                int idx2 = (packed >> (j * 2)) & 0x3;
+                vo[i + j] = __int2half_rn(idx2);
+            }
         }
         return vo;
     }
@@ -932,12 +943,12 @@ struct ConvertKvCache<uint2_t, half> {
     template<int N>
     __device__ auto operator()(const Array<uint2_t, N>& vi) const -> Array<half, N>
     {
-        auto vo = convert(vi);
-        PRAGMA_UNROLL
-        for (int i = 0; i < N; ++i) {
-            vo[i] = vo[i] * scale_ + zero_;
-        }
-        return vo;
+        // For TurboQuant: only convert() is used (bit-unpack),
+        // DequantV::apply() handles the actual dequantization.
+        // The affine path (scale*val+zero) is incorrect for codebook quantization.
+        // We still provide operator() for API compatibility, but it should
+        // not be used in TurboQuant paths.
+        return convert(vi);
     }
 };
 
@@ -946,7 +957,7 @@ template<>
 struct ConvertKvCache<uint2_t, float> {
     ConvertKvCache<uint2_t, half> impl_;
 
-    __device__ ConvertKvCache(float scale, float zero): impl_{scale, zero} {}
+    __device__ ConvertKvCache(float scale, float zero): impl_{(half)scale, (half)zero} {}
 
     template<int N>
     __device__ auto operator()(const Array<uint2_t, N>& vi) const
