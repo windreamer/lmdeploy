@@ -82,14 +82,20 @@ public:
         int head_dim_;
         int head_num_;
         int block_len_;
-        int t_bits_;
-        int q_bits_;
+        int param_bits_;
+        int k_bits_;
+        int v_bits_;
+        int k_param_count_;
+        int v_param_count_;
         bool share_kv_;
-        int t_bits() const { return t_bits_; }
-        int q_bits() const { return q_bits_; }
-        int head_dim() const { return head_dim_; }
-        int head_num() const { return head_num_; }
-        int block_len() const { return block_len_; }
+        int  k_bits() const { return k_bits_; }
+        int  v_bits() const { return v_bits_; }
+        int  k_param_count() const { return k_param_count_; }
+        int  v_param_count() const { return v_param_count_; }
+        int  param_bits() const { return param_bits_; }
+        int  head_dim() const { return head_dim_; }
+        int  head_num() const { return head_num_; }
+        int  block_len() const { return block_len_; }
         bool is_share_kv() const { return share_kv_; }
     };
     // clang-format on

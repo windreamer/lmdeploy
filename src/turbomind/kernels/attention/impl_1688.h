@@ -38,7 +38,8 @@ struct Impl<MMA_1688, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP
 
     using T       = T_;
     using KvQuant = KvQuant_;
-    using Tkv     = typename KvQuantTrait<KvQuant, T>::Storage;
+    using TK      = typename KvQuantTrait<KvQuant, T>::StorageK;
+    using TV      = typename KvQuantTrait<KvQuant, T>::StorageV;
 
     static_assert(std::is_same_v<KvQuant_, KvQuantNone>);
 
@@ -81,17 +82,20 @@ struct Impl<MMA_1688, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP
     union SharedStorage {
         __align__(16) T Q[SmemLayoutQ::kSize];
         struct {
-            __align__(16) Tkv K[SmemLayoutK::kSize];
-            __align__(16) Tkv V[SmemLayoutV::kSize];
+            __align__(16) TK K[SmemLayoutK::kSize];
+            __align__(16) TV V[SmemLayoutV::kSize];
         };
     };
 
     static constexpr bool kUseSmemQ = false;
 
-    using ThreadMapQ  = RakedThreadMap<HeadDim, CTA_Q * CTA_H, 8, kWarpCount>;
-    using ThreadMapKV = RakedThreadMap<HeadDim, CTA_S, 8, kWarpCount>;
+    using ThreadMapQ = RakedThreadMap<HeadDim, CTA_Q * CTA_H, 8, kWarpCount>;
+    using ThreadMapK = RakedThreadMap<HeadDim, CTA_S, 8, kWarpCount>;
+    using ThreadMapV = ThreadMapK;
 
     using ThreadMapKVp = void;
+    using PointerK     = T*;
+    using PointerV     = T*;
 
     __device__ static void Sync()
     {

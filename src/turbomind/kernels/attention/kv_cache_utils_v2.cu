@@ -40,7 +40,8 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                                                     FastDivmod      cp_size,
                                                     BlockLayout     block_layout)
 {
-    using Tkv = typename KvQuantTrait<KvQuant, T>::Storage;
+    using TK = typename KvQuantTrait<KvQuant, T>::StorageK;
+    using TV = typename KvQuantTrait<KvQuant, T>::StorageV;
 
     constexpr int kVecSize = sizeof(uint4) / sizeof(T);
 
@@ -149,19 +150,19 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
     Array<T, 2> param_V[ITER_S];
 
     if constexpr (KvQuantTrait<KvQuant, T>::kQuantKV) {
-        warp_stats<Map::kWarpThreadC>(param_K, vec_K, KvQuantTrait<KvQuant, T>::kBits);
+        warp_stats<Map::kWarpThreadC>(param_K, vec_K, KvQuantTrait<KvQuant, T>::kBitsK);
         if constexpr (HAS_V) {
-            warp_stats<Map::kWarpThreadC>(param_V, vec_V, KvQuantTrait<KvQuant, T>::kBits);
+            warp_stats<Map::kWarpThreadC>(param_V, vec_V, KvQuantTrait<KvQuant, T>::kBitsV);
         }
     }
 
-    Array<Tkv, kVecSize> out_K[ITER_S][ITER_C];
-    Array<Tkv, kVecSize> out_V[ITER_S][ITER_C];
+    Array<TK, kVecSize> out_K[ITER_S][ITER_C];
+    Array<TV, kVecSize> out_V[ITER_S][ITER_C];
 
     PRAGMA_UNROLL
     for (int s = 0; s < ITER_S; ++s) {
-        ConvertKvCache<T, Tkv> conv_K{param_K[s][0], param_K[s][1]};
-        ConvertKvCache<T, Tkv> conv_V{param_V[s][0], param_V[s][1]};
+        ConvertKvCache<T, TK> conv_K{param_K[s][0], param_K[s][1]};
+        ConvertKvCache<T, TV> conv_V{param_V[s][0], param_V[s][1]};
         PRAGMA_UNROLL
         for (int c = 0; c < ITER_C; ++c) {
             out_K[s][c] = conv_K(vec_K[s][c]);
@@ -194,13 +195,10 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                 }
                 if constexpr (KvQuantTrait<KvQuant, T>::kQuantKV) {
                     if (offset.x == 0) {
-                        StoreQuantParam<Tkv>(k_param, param_K[s]);
+                        StoreQuantParam<TK>(k_param, param_K[s]);
                         if constexpr (HAS_V) {
-                            StoreQuantParam<Tkv>(v_param, param_V[s]);
+                            StoreQuantParam<TV>(v_param, param_V[s]);
                         }
-                        // if (ti == history_len) {
-                        // printf("src %d %f %f\n", ti, (float)param_K[s][0], (float)param_K[s][1]);
-                        // }
                     }
                 }
             });
@@ -234,9 +232,10 @@ void invokeProcessKV_v2(char**                 blocks,
                         cudaStream_t           stream)
 {
 
-    auto invoke = [&](auto tkv, const auto dim) {
-        using KvQuant = decltype(tkv);
-        using Tkv     = typename KvQuantTrait<KvQuant, T>::Storage;
+    auto invoke = [&](auto kv_quant, const auto dim) {
+        using KvQuant = decltype(kv_quant);
+        using TK      = typename KvQuantTrait<KvQuant, T>::StorageK;
+        using TV      = typename KvQuantTrait<KvQuant, T>::StorageV;
 
         constexpr int  kHeadDim = dim;
         constexpr bool kShareKV = kHeadDim == 576;
@@ -270,22 +269,22 @@ void invokeProcessKV_v2(char**                 blocks,
                                                                                   block_layout);
     };
 
-    auto dispatch = [&](auto tkv) {
+    auto dispatch = [&](auto kv_quant) {
         if (0) {}
         else if (head_dim == 64) {
-            return invoke(tkv, std::integral_constant<int, 64>{});
+            return invoke(kv_quant, std::integral_constant<int, 64>{});
         }
         else if (head_dim == 128) {
-            return invoke(tkv, std::integral_constant<int, 128>{});
+            return invoke(kv_quant, std::integral_constant<int, 128>{});
         }
         else if (head_dim == 192) {
-            return invoke(tkv, std::integral_constant<int, 192>{});
+            return invoke(kv_quant, std::integral_constant<int, 192>{});
         }
         else if (head_dim == 256) {
-            return invoke(tkv, std::integral_constant<int, 256>{});
+            return invoke(kv_quant, std::integral_constant<int, 256>{});
         }
         else if (head_dim == 576) {
-            return invoke(tkv, std::integral_constant<int, 576>{});
+            return invoke(kv_quant, std::integral_constant<int, 576>{});
         }
         TM_UNREACHABLE;
     };
@@ -334,22 +333,23 @@ INSTANTIATE_invokeProcessKV_v2(nv_bfloat16);
 #endif
 
 template<int CTA_S, int HeadDim, int WarpCnt, class T, class KvQuant, class BlockLayout>
-__global__ void __launch_bounds__(128) flattenKV_v2(T*                                                 k,
-                                                    T*                                                 v,
-                                                    const typename KvQuantTrait<KvQuant, T>::Storage** blocks,
-                                                    const int*                                         cu_k_len,
-                                                    const int*                                         cu_block_num,
-                                                    RopeKernelParam                                    rope_param,
-                                                    int64_t                                            stride_b,
-                                                    int64_t                                            stride_c,
-                                                    int64_t                                            stride_h,
-                                                    int64_t                                            stride_s,
-                                                    int                                                layer_id,
-                                                    int                                                cp_rank,
-                                                    FastDivmod                                         cp_size,
-                                                    BlockLayout                                        block_layout)
+__global__ void __launch_bounds__(128) flattenKV_v2(T*                                                  k,
+                                                    T*                                                  v,
+                                                    const typename KvQuantTrait<KvQuant, T>::StorageK** blocks,
+                                                    const int*                                          cu_k_len,
+                                                    const int*                                          cu_block_num,
+                                                    RopeKernelParam                                     rope_param,
+                                                    int64_t                                             stride_b,
+                                                    int64_t                                             stride_c,
+                                                    int64_t                                             stride_h,
+                                                    int64_t                                             stride_s,
+                                                    int                                                 layer_id,
+                                                    int                                                 cp_rank,
+                                                    FastDivmod                                          cp_size,
+                                                    BlockLayout                                         block_layout)
 {
-    using Tkv = typename KvQuantTrait<KvQuant, T>::Storage;
+    using TK = typename KvQuantTrait<KvQuant, T>::StorageK;
+    using TV = typename KvQuantTrait<KvQuant, T>::StorageV;
 
     constexpr int kVecSize = sizeof(uint4) / sizeof(T);
 
@@ -379,8 +379,8 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*                          
 
     const int2 offset = Map::get_offset(warp_id, lane_id);
 
-    Array<Tkv, kVecSize> __align__(16) vec_K[ITER_S][ITER_C];
-    Array<Tkv, kVecSize> __align__(16) vec_V[ITER_S][ITER_C];
+    Array<TK, kVecSize> __align__(16) vec_K[ITER_S][ITER_C];
+    Array<TV, kVecSize> __align__(16) vec_V[ITER_S][ITER_C];
 
     Array<T, kVecSize> __align__(16) out_K[ITER_S][ITER_C];
     Array<T, kVecSize> __align__(16) out_V[ITER_S][ITER_C];
@@ -420,8 +420,8 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*                          
 
     PRAGMA_UNROLL
     for (int s = 0; s < ITER_S; ++s) {
-        ConvertKvCache<Tkv, T> conv_K{param_K[s][0], param_K[s][1]};
-        ConvertKvCache<Tkv, T> conv_V{param_V[s][0], param_V[s][1]};
+        ConvertKvCache<TK, T> conv_K{param_K[s][0], param_K[s][1]};
+        ConvertKvCache<TV, T> conv_V{param_V[s][0], param_V[s][1]};
         PRAGMA_UNROLL
         for (int c = 0; c < ITER_C; ++c) {
             out_K[s][c] = conv_K(vec_K[s][c]);
@@ -488,9 +488,10 @@ void invokeFlattenKV_v2(T*                     k,
                         cudaStream_t           stream)
 {
 
-    auto invoke = [&](auto tkv, const auto dim) {
-        using KvQuant = decltype(tkv);
-        using Tkv     = typename KvQuantTrait<KvQuant, T>::Storage;
+    auto invoke = [&](auto kv_quant, const auto dim) {
+        using KvQuant = decltype(kv_quant);
+        using TK      = typename KvQuantTrait<KvQuant, T>::StorageK;
+        using TV      = typename KvQuantTrait<KvQuant, T>::StorageV;
 
         constexpr int  kHeadDim = dim;
         constexpr bool kShareKV = kHeadDim == 576;
@@ -507,7 +508,7 @@ void invokeFlattenKV_v2(T*                     k,
 
         flattenKV_v2<CTA_S, kHeadDim, kWarpCnt, T, KvQuant><<<grid, block, 0, stream>>>(k,
                                                                                         v,
-                                                                                        (const Tkv**)blocks,
+                                                                                        (const TK**)blocks,
                                                                                         cu_k_len,
                                                                                         cu_block_num,
                                                                                         rope_param,
@@ -521,22 +522,22 @@ void invokeFlattenKV_v2(T*                     k,
                                                                                         block_layout);
     };
 
-    auto dispatch = [&](auto tkv) {
+    auto dispatch = [&](auto kv_quant) {
         if (0) {}
         else if (head_dim == 64) {
-            return invoke(tkv, std::integral_constant<int, 64>{});
+            return invoke(kv_quant, std::integral_constant<int, 64>{});
         }
         else if (head_dim == 128) {
-            return invoke(tkv, std::integral_constant<int, 128>{});
+            return invoke(kv_quant, std::integral_constant<int, 128>{});
         }
         else if (head_dim == 192) {
-            return invoke(tkv, std::integral_constant<int, 192>{});
+            return invoke(kv_quant, std::integral_constant<int, 192>{});
         }
         else if (head_dim == 256) {
-            return invoke(tkv, std::integral_constant<int, 256>{});
+            return invoke(kv_quant, std::integral_constant<int, 256>{});
         }
         else if (head_dim == 576) {
-            return invoke(tkv, std::integral_constant<int, 576>{});
+            return invoke(kv_quant, std::integral_constant<int, 576>{});
         }
         TM_UNREACHABLE;
     };

@@ -26,7 +26,8 @@ struct AttentionUniversal {
 
     using T       = typename Mainloop::T;
     using KvQuant = typename Mainloop::Impl::KvQuant;
-    using Tkv     = typename Mainloop::Tkv;
+    using TK      = typename Mainloop::TK;
+    using TV      = typename Mainloop::TV;
 
     using Impl = typename Mainloop::Impl;
 
@@ -269,17 +270,17 @@ struct AttentionUniversal {
             Array<T, 2> param_V[1];
 
             if constexpr (attention::KvQuantTrait<KvQuant, T>::kQuantKV) {
-                warp_stats<Map::kWarpThreadC>(param_K, vec_K, attention::KvQuantTrait<KvQuant, T>::kBits);
+                warp_stats<Map::kWarpThreadC>(param_K, vec_K, attention::KvQuantTrait<KvQuant, T>::kBitsK);
                 if constexpr (HAS_V) {
-                    warp_stats<Map::kWarpThreadC>(param_V, vec_V, attention::KvQuantTrait<KvQuant, T>::kBits);
+                    warp_stats<Map::kWarpThreadC>(param_V, vec_V, attention::KvQuantTrait<KvQuant, T>::kBitsV);
                 }
             }
 
-            Array<Tkv, kVecSize> out_K[1][ITER_C];
-            Array<Tkv, kVecSize> out_V[1][ITER_C];
+            Array<TK, kVecSize> out_K[1][ITER_C];
+            Array<TV, kVecSize> out_V[1][ITER_C];
 
-            ConvertKvCache<T, Tkv> conv_K{param_K[0][0], param_K[0][1]};
-            ConvertKvCache<T, Tkv> conv_V{param_V[0][0], param_V[0][1]};
+            ConvertKvCache<T, TK> conv_K{param_K[0][0], param_K[0][1]};
+            ConvertKvCache<T, TV> conv_V{param_V[0][0], param_V[0][1]};
             PRAGMA_UNROLL
             for (int c = 0; c < ITER_C; ++c) {
                 out_K[0][c] = conv_K(vec_K[0][c]);
@@ -305,9 +306,9 @@ struct AttentionUniversal {
                     }
                     if constexpr (attention::KvQuantTrait<KvQuant, T>::kQuantKV) {
                         if (qi < CTA_Q && offset.x == 0) {
-                            StoreQuantParam<Tkv>(k_param, param_K[0]);
+                            StoreQuantParam<TK>(k_param, param_K[0]);
                             if constexpr (HAS_V) {
-                                StoreQuantParam<Tkv>(v_param, param_V[0]);
+                                StoreQuantParam<TV>(v_param, param_V[0]);
                             }
                         }
                     }

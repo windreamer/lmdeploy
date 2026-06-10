@@ -18,7 +18,7 @@ constexpr int kWARP_S  = 16;
 constexpr int kStages  = 3;
 constexpr int kQh      = 1;
 
-// HeadDim=192 uses SIMT+kStages for all Tkv (incl. uint8_t), kQh=1 only
+// HeadDim=192 uses SIMT+kStages for all TK (incl. uint8_t), kQh=1 only
 template<class T, class KvQuant>
 using KT = AttentionUniversal<
     arch::Sm80,

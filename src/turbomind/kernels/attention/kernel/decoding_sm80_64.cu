@@ -20,13 +20,13 @@ constexpr int kWARP_S  = 16;
 template<class Mainloop_, class CacheIter>
 using KT = AttentionUniversal<arch::Sm80, Mainloop_, CacheIter, DecodingCtaMap>;
 
-// T==Tkv, Qh<=2: SIMT, stages=3
+// T==TK, Qh<=2: SIMT, stages=3
 template<class T, int Qh>
 using Decoding_SIMT =
     KT<Mainloop<Sm80_CpAsync<3>, Impl<MMA_SIMT, T, KvQuantNone, Qh, 1, kCTA_S, Qh, 1, kWARP_S, kHeadDim, 3>>,
        GetBlockIterFactory<T, KvQuantNone, kCTA_S, kHeadDim>>;
 
-// Qh>2: MMA_81616; Stages=3 for T==Tkv, Stages=5 for quant Tkv
+// Qh>2: MMA_81616; Stages=3 for T==TK, Stages=5 for quant TK
 // Qh = (Qh_+7)/8*8: Qh_=3..8→Qh=8, Qh_=9→Qh=16
 template<class T, class KvQuant, int Qh, int Stages>
 using Decoding_MMA =

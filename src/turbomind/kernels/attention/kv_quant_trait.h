@@ -15,40 +15,66 @@ struct KvQuantInt8 {
 struct KvQuantInt4 {
 };
 
+template<typename T>
+struct AffineDequant {
+    __device__ static T apply(T val, T scale, T zero, int /*head_dim*/)
+    {
+        return val * scale + zero;
+    }
+};
+
 template<typename KvQuant, typename T>
 struct KvQuantTrait;
 
 template<typename T>
 struct KvQuantTrait<KvQuantNone, T> {
-    using Storage = T;
-    using Pointer = T*;
+    using StorageK = T;
+    using StorageV = T;
+    using PointerK = T*;
+    using PointerV = T*;
+    using DequantK = AffineDequant<T>;
+    using DequantV = AffineDequant<T>;
 
-    static constexpr int  kBits       = bitsof<T>;
-    static constexpr bool kQuantKV    = false;
-    static constexpr int  kParamCount = 0;
-    static constexpr int  kv_quant    = 0;
+    static constexpr int  kBitsK       = bitsof<T>;
+    static constexpr int  kBitsV       = bitsof<T>;
+    static constexpr bool kQuantKV     = false;
+    static constexpr int  kParamCountK = 0;
+    static constexpr int  kParamCountV = 0;
+    static constexpr int  kv_quant     = 0;
 };
 
 template<typename T>
 struct KvQuantTrait<KvQuantInt8, T> {
-    using Storage = uint8_t;
-    using Pointer = uint8_t*;
+    using StorageK = uint8_t;
+    using StorageV = uint8_t;
+    using PointerK = uint8_t*;
+    using PointerV = uint8_t*;
+    using DequantK = AffineDequant<T>;
+    using DequantV = AffineDequant<T>;
 
-    static constexpr int  kBits       = 8;
-    static constexpr bool kQuantKV    = true;
-    static constexpr int  kParamCount = 2;
-    static constexpr int  kv_quant    = 8;
+    static constexpr int  kBitsK       = 8;
+    static constexpr int  kBitsV       = 8;
+    static constexpr bool kQuantKV     = true;
+    static constexpr int  kParamCountK = 2;
+    static constexpr int  kParamCountV = 2;
+    static constexpr int  kv_quant     = 8;
 };
 
 template<typename T>
 struct KvQuantTrait<KvQuantInt4, T> {
-    using Storage = uint4_t;
-    using Pointer = SubBytePtr<uint4_t>;
+    using StorageK = uint4_t;
+    using StorageV = uint4_t;
+    using PointerK = SubBytePtr<uint4_t>;
+    using PointerV = SubBytePtr<uint4_t>;
+    using DequantK = AffineDequant<T>;
+    using DequantV = AffineDequant<T>;
 
-    static constexpr int  kBits       = 4;
-    static constexpr bool kQuantKV    = true;
-    static constexpr int  kParamCount = 2;
-    static constexpr int  kv_quant    = 4;
+    static constexpr int  kBitsK       = 4;
+    static constexpr int  kBitsV       = 4;
+    static constexpr bool kQuantKV     = true;
+    static constexpr int  kParamCountK = 2;
+    static constexpr int  kParamCountV = 2;
+    static constexpr int  kv_quant     = 4;
 };
 
 template<int quant_policy>

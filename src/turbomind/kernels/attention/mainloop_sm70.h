@@ -14,13 +14,15 @@ struct Mainloop<arch::Sm70, Impl_> {
 
     using Impl = Impl_;
 
-    using T   = typename Impl::T;
-    using Tkv = typename Impl::Tkv;
+    using T  = typename Impl::T;
+    using TK = typename Impl::TK;
+    using TV = typename Impl::TV;
 
-    using ThreadMapKV = typename Impl::ThreadMapKV;
+    using ThreadMapK = typename Impl::ThreadMapK;
+    using ThreadMapV = typename Impl::ThreadMapV;
 
-    using GmemIterK_ = Sm70GmemIterator<Tkv, ThreadMapKV, typename Impl::SmemLayoutK, 0>;
-    using GmemIterV_ = Sm70GmemIterator<Tkv, ThreadMapKV, typename Impl::SmemLayoutV, 1>;
+    using GmemIterK_ = Sm70GmemIterator<TK, ThreadMapK, typename Impl::SmemLayoutK, 0>;
+    using GmemIterV_ = Sm70GmemIterator<TV, ThreadMapV, typename Impl::SmemLayoutV, 1>;
 
     /// TODO: hide this behind a SFINAE gate so that `*KVp` stuff won't be needed for non-quantized impls
     using CombinedIterK =

@@ -22,19 +22,29 @@ struct Config {
     int head_num_;
     int block_len_;
 
-    TM_HOST_DEVICE constexpr int t_bits() const
+    TM_HOST_DEVICE constexpr int k_bits() const
     {
-        if constexpr (Trait::kQuantKV) {
-            return bitsof<T>;
-        }
-        else {
-            return 0;
-        }
+        return Trait::kBitsK;
     }
 
-    TM_HOST_DEVICE constexpr int q_bits() const
+    TM_HOST_DEVICE constexpr int v_bits() const
     {
-        return Trait::kBits;
+        return Trait::kBitsV;
+    }
+
+    TM_HOST_DEVICE constexpr int k_param_count() const
+    {
+        return Trait::kParamCountK;
+    }
+
+    TM_HOST_DEVICE constexpr int v_param_count() const
+    {
+        return Trait::kParamCountV;
+    }
+
+    TM_HOST_DEVICE constexpr int param_bits() const
+    {
+        return bitsof<T>;
     }
 
     TM_HOST_DEVICE constexpr int head_dim() const
@@ -64,7 +74,8 @@ template<class T, class KvQuant, class Layout>
 class Head {
 public:
     using Trait = KvQuantTrait<KvQuant, T>;
-    using Tkv   = typename Trait::Storage;
+    using TK    = typename Trait::StorageK;
+    using TV    = typename Trait::StorageV;
     TM_HOST_DEVICE Head(Layout layout, int layer_id, int head_id):
         layout_{layout}, layer_id_{layer_id}, head_id_{head_id}
     {
@@ -72,21 +83,21 @@ public:
 
     TM_HOST_DEVICE auto k_data(char* block, int ti) const
     {
-        if constexpr (std::is_same_v<Tkv, uint4_t>) {
-            return SubBytePtr<Tkv>{block + layout_.k_data(layer_id_, head_id_, ti)};
+        if constexpr (Trait::kBitsK < 8) {
+            return typename Trait::PointerK{block + layout_.k_data(layer_id_, head_id_, ti)};
         }
         else {
-            return reinterpret_cast<Tkv*>(block + layout_.k_data(layer_id_, head_id_, ti));
+            return reinterpret_cast<TK*>(block + layout_.k_data(layer_id_, head_id_, ti));
         }
     }
 
     TM_HOST_DEVICE auto v_data(char* block, int ti) const
     {
-        if constexpr (std::is_same_v<Tkv, uint4_t>) {
-            return SubBytePtr<Tkv>{block + layout_.v_data(layer_id_, head_id_, ti)};
+        if constexpr (Trait::kBitsV < 8) {
+            return typename Trait::PointerV{block + layout_.v_data(layer_id_, head_id_, ti)};
         }
         else {
-            return reinterpret_cast<Tkv*>(block + layout_.v_data(layer_id_, head_id_, ti));
+            return reinterpret_cast<TV*>(block + layout_.v_data(layer_id_, head_id_, ti));
         }
     }
 
@@ -149,40 +160,62 @@ struct Layout {
 
     TM_HOST_DEVICE constexpr bool is_share_kv() const
     {
-        // return 0;
         return config().is_share_kv();
     }
 
-    TM_HOST_DEVICE constexpr int kv_num() const
+    TM_HOST_DEVICE int k_token_data_size() const
     {
-        // return 2;
-        return is_share_kv() ? 1 : 2;
+        return config().k_bits() * config().head_dim() / 8;
     }
 
-    TM_HOST_DEVICE int token_data_size() const
+    TM_HOST_DEVICE int v_token_data_size() const
     {
-        return config().q_bits() * config().head_dim() / 8;
+        return config().v_bits() * config().head_dim() / 8;
     }
 
-    TM_HOST_DEVICE int token_param_size() const
+    TM_HOST_DEVICE int k_token_param_size() const
     {
-        return config().t_bits() * 2 / 8;  // 2 for scales/zeros
+        return config().param_bits() * config().k_param_count() / 8;
     }
 
-    TM_HOST_DEVICE int head_data_size() const
+    TM_HOST_DEVICE int v_token_param_size() const
     {
-        return config().block_len() * token_data_size();
+        return config().param_bits() * config().v_param_count() / 8;
     }
 
-    TM_HOST_DEVICE int head_param_size() const
+    TM_HOST_DEVICE int k_head_data_size() const
     {
-        return config().block_len() * token_param_size();
+        return config().block_len() * k_token_data_size();
+    }
+
+    TM_HOST_DEVICE int v_head_data_size() const
+    {
+        return is_share_kv() ? 0 : config().block_len() * v_token_data_size();
+    }
+
+    TM_HOST_DEVICE int k_head_param_size() const
+    {
+        return config().block_len() * k_token_param_size();
+    }
+
+    TM_HOST_DEVICE int v_head_param_size() const
+    {
+        return is_share_kv() ? 0 : config().block_len() * v_token_param_size();
+    }
+
+    TM_HOST_DEVICE int head_unit_data_size() const
+    {
+        return k_head_data_size() + v_head_data_size();
+    }
+
+    TM_HOST_DEVICE int head_unit_param_size() const
+    {
+        return k_head_param_size() + v_head_param_size();
     }
 
     TM_HOST_DEVICE int layer_size() const
     {
-        // TODO: enforce alignment
-        return config().head_num() * kv_num() * head_data_size() + config().head_num() * kv_num() * head_param_size();
+        return config().head_num() * head_unit_data_size() + config().head_num() * head_unit_param_size();
     }
 
     TM_HOST_DEVICE int block_size(int layer_num) const
@@ -192,22 +225,28 @@ struct Layout {
 
     TM_HOST_DEVICE int k_data(int layer, int head, int token) const
     {
-        return layer_data(layer) + head_data(head) + token_data(token);
+        return layer_data(layer) + head * head_unit_data_size() + k_token_data(token);
     }
 
     TM_HOST_DEVICE int v_data(int layer, int head, int token) const
     {
-        return k_data(layer, head, token) + (is_share_kv() ? 0 : head_data_size());
+        if (is_share_kv()) {
+            return k_data(layer, head, token);
+        }
+        return layer_data(layer) + head * head_unit_data_size() + k_head_data_size() + v_token_data(token);
     }
 
     TM_HOST_DEVICE int k_param(int layer, int head, int token) const
     {
-        return layer_param(layer) + head_param(head) + token_param(token);
+        return layer_param(layer) + head * head_unit_param_size() + k_token_param(token);
     }
 
     TM_HOST_DEVICE int v_param(int layer, int head, int token) const
     {
-        return k_param(layer, head, token) + (is_share_kv() ? 0 : head_param_size());
+        if (is_share_kv()) {
+            return k_param(layer, head, token);
+        }
+        return layer_param(layer) + head * head_unit_param_size() + k_head_param_size() + v_token_param(token);
     }
 
     TM_HOST_DEVICE int layer_data(int layer) const
@@ -217,27 +256,27 @@ struct Layout {
 
     TM_HOST_DEVICE int layer_param(int layer) const
     {
-        return layer_data(layer) + head_data(config_.head_num());
+        return layer_data(layer) + config_.head_num() * head_unit_data_size();
     }
 
-    TM_HOST_DEVICE int head_data(int head) const
+    TM_HOST_DEVICE int k_token_data(int ti) const
     {
-        return head * kv_num() * head_data_size();
+        return ti * k_token_data_size();
     }
 
-    TM_HOST_DEVICE int head_param(int head) const
+    TM_HOST_DEVICE int v_token_data(int ti) const
     {
-        return head * kv_num() * head_param_size();
+        return ti * v_token_data_size();
     }
 
-    TM_HOST_DEVICE int token_data(int ti) const
+    TM_HOST_DEVICE int k_token_param(int ti) const
     {
-        return ti * token_data_size();
+        return ti * k_token_param_size();
     }
 
-    TM_HOST_DEVICE int token_param(int ti) const
+    TM_HOST_DEVICE int v_token_param(int ti) const
     {
-        return ti * token_param_size();
+        return ti * v_token_param_size();
     }
 };
 
@@ -247,12 +286,14 @@ void dump(const Layout<Config>& layout)
     std::cout << "head_dim: " << layout.config().head_dim() << "\n";
     std::cout << "head_num: " << layout.config().head_num() << "\n";
     std::cout << "block_len: " << layout.config().block_len() << "\n";
-    std::cout << "q_bits: " << layout.config().q_bits() << "\n";
-    std::cout << "t_bits: " << layout.config().t_bits() << "\n";
-    std::cout << "token_data_size: " << layout.token_data_size() << "\n";
-    std::cout << "token_param_size: " << layout.token_param_size() << "\n";
-    std::cout << "head_data_size: " << layout.head_data_size() << "\n";
-    std::cout << "head_param_size: " << layout.head_param_size() << "\n";
+    std::cout << "k_bits: " << layout.config().k_bits() << "\n";
+    std::cout << "v_bits: " << layout.config().v_bits() << "\n";
+    std::cout << "k_token_data_size: " << layout.k_token_data_size() << "\n";
+    std::cout << "v_token_data_size: " << layout.v_token_data_size() << "\n";
+    std::cout << "k_head_data_size: " << layout.k_head_data_size() << "\n";
+    std::cout << "v_head_data_size: " << layout.v_head_data_size() << "\n";
+    std::cout << "k_head_param_size: " << layout.k_head_param_size() << "\n";
+    std::cout << "v_head_param_size: " << layout.v_head_param_size() << "\n";
     std::cout << "layer_size: " << layout.layer_size() << "\n";
 }
 

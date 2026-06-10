@@ -20,7 +20,7 @@ void invokeAttention(const typename Kernel::ParamType& params, int sm_count, int
         [[maybe_unused]] static const int _ = [&] {
             // std::cout << __PRETTY_FUNCTION__ << std::endl;
             // std::cout << "GmemMap:\n";
-            // Print(typename Kernel::Impl::ThreadMapKV{});
+            // Print(typename Kernel::Impl::ThreadMapK{});
             // std::cout << "\nDynamic smem size: " << kSmemSize << "\n";
             return 0;
         }();

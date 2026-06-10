@@ -17,7 +17,8 @@ template<class T_, class KvQuant_, int CTA_H_, int CTA_Q_, int CTA_S_, int WARP_
 struct Impl<MMA_884, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S, HeadDim> {
     using T       = T_;
     using KvQuant = KvQuant_;
-    using Tkv     = typename KvQuantTrait<KvQuant, T>::Storage;
+    using TK      = typename KvQuantTrait<KvQuant, T>::StorageK;
+    using TV      = typename KvQuantTrait<KvQuant, T>::StorageV;
 
     static_assert(std::is_same_v<KvQuant_, KvQuantNone>);
 
@@ -110,14 +111,17 @@ struct Impl<MMA_884, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP
     static constexpr bool kUseSmemP = false;
 
     // For HeadDim=256, WarpThreadC needs to be explicitly specified to avoid exceeding WARP_SIZE
-    using ThreadMapQ  = std::conditional_t<HeadDim == 256,
+    using ThreadMapQ = std::conditional_t<HeadDim == 256,
                                           RakedThreadMap<HeadDim, CTA_Q, 4, kWarpCount, 8>,
                                           RakedThreadMap<HeadDim, CTA_Q, 4, kWarpCount>>;
-    using ThreadMapKV = std::conditional_t<HeadDim == 256,
-                                           RakedThreadMap<HeadDim, CTA_S, 4, kWarpCount, 8>,
-                                           RakedThreadMap<HeadDim, CTA_S, 4, kWarpCount>>;
+    using ThreadMapK = std::conditional_t<HeadDim == 256,
+                                          RakedThreadMap<HeadDim, CTA_S, 4, kWarpCount, 8>,
+                                          RakedThreadMap<HeadDim, CTA_S, 4, kWarpCount>>;
+    using ThreadMapV = ThreadMapK;
 
     using ThreadMapKVp = void;
+    using PointerK     = T*;
+    using PointerV     = T*;
 
     static constexpr bool kDeferReduceL = true;
 

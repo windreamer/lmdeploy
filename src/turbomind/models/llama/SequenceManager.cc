@@ -110,6 +110,9 @@ SequenceManager::SequenceManager(int                     head_dim,
         cache_block_seq_len,
         elem_bits == dbits ? 0 : dbits,
         elem_bits,
+        elem_bits,
+        elem_bits == dbits ? 0 : 2,
+        elem_bits == dbits ? 0 : 2,
         head_dim == 576,  // share kv
     };
 
