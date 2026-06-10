@@ -4,6 +4,7 @@
 
 #include "src/turbomind/kernels/attention/block.h"
 #include "src/turbomind/kernels/attention/kv_cache_utils_v2.h"
+#include "src/turbomind/kernels/attention/kv_quant_trait.h"
 #include "src/turbomind/kernels/attention/quantization.h"
 #include "src/turbomind/kernels/attention/rotary_embedding.h"
 #include "src/turbomind/kernels/core/array_ops.h"
@@ -13,9 +14,14 @@
 
 namespace turbomind {
 
+using attention::KvQuantInt4;
+using attention::KvQuantInt8;
+using attention::KvQuantNone;
+using attention::KvQuantTrait;
+
 using cutlass::FastDivmod;
 
-template<class Tkv, int CTA_S, int HeadDim, int WarpCnt, class T, class BlockLayout>
+template<class KvQuant, int CTA_S, int HeadDim, int WarpCnt, class T, class BlockLayout>
 __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                                                     const T*        k,
                                                     const T*        v,
@@ -34,6 +40,7 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                                                     FastDivmod      cp_size,
                                                     BlockLayout     block_layout)
 {
+    using Tkv = typename KvQuantTrait<KvQuant, T>::Storage;
 
     constexpr int kVecSize = sizeof(uint4) / sizeof(T);
 
@@ -141,10 +148,10 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
     Array<T, 2> param_K[ITER_S];
     Array<T, 2> param_V[ITER_S];
 
-    if constexpr (!std::is_same_v<T, Tkv>) {
-        warp_stats<Map::kWarpThreadC>(param_K, vec_K, bitsof<Tkv>);
+    if constexpr (KvQuantTrait<KvQuant, T>::kQuantKV) {
+        warp_stats<Map::kWarpThreadC>(param_K, vec_K, KvQuantTrait<KvQuant, T>::kBits);
         if constexpr (HAS_V) {
-            warp_stats<Map::kWarpThreadC>(param_V, vec_V, bitsof<Tkv>);
+            warp_stats<Map::kWarpThreadC>(param_V, vec_V, KvQuantTrait<KvQuant, T>::kBits);
         }
     }
 
@@ -168,7 +175,7 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
 
     blocks += cu_block_num[batch_idx];
 
-    block::Head<T, Tkv, BlockLayout> block_head{block_layout, layer_id, head_idx};
+    block::Head<T, KvQuant, BlockLayout> block_head{block_layout, layer_id, head_idx};
 
     PRAGMA_UNROLL
     for (int s = 0; s < ITER_S; ++s) {
@@ -185,7 +192,7 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**          blocks,
                         Store(&v_cache[di], out_V[s][c]);
                     }
                 }
-                if constexpr (!std::is_same_v<T, Tkv>) {
+                if constexpr (KvQuantTrait<KvQuant, T>::kQuantKV) {
                     if (offset.x == 0) {
                         StoreQuantParam<Tkv>(k_param, param_K[s]);
                         if constexpr (HAS_V) {
@@ -228,7 +235,8 @@ void invokeProcessKV_v2(char**                 blocks,
 {
 
     auto invoke = [&](auto tkv, const auto dim) {
-        using Tkv = decltype(tkv);
+        using KvQuant = decltype(tkv);
+        using Tkv     = typename KvQuantTrait<KvQuant, T>::Storage;
 
         constexpr int  kHeadDim = dim;
         constexpr bool kShareKV = kHeadDim == 576;
@@ -241,25 +249,25 @@ void invokeProcessKV_v2(char**                 blocks,
 
         TM_CHECK_EQ(head_dim, kHeadDim);
 
-        block::Layout block_layout{block::Config<T, Tkv, kHeadDim, kShareKV>{head_num, block_seq_len}};
+        block::Layout block_layout{block::Config<T, KvQuant, kHeadDim, kShareKV>{head_num, block_seq_len}};
 
-        ProcessKV_v2<Tkv, CTA_S, kHeadDim, WARPS><<<grid, block, 0, stream>>>(blocks,
-                                                                              k,
-                                                                              v,
-                                                                              k_bias,
-                                                                              v_bias,
-                                                                              cu_q_len,
-                                                                              cu_k_len,
-                                                                              cu_block_num,
-                                                                              rope_param,
-                                                                              stride_b,
-                                                                              stride_c,
-                                                                              stride_h,
-                                                                              stride_s,
-                                                                              layer_id,
-                                                                              cp_rank,
-                                                                              cp_size,
-                                                                              block_layout);
+        ProcessKV_v2<KvQuant, CTA_S, kHeadDim, WARPS><<<grid, block, 0, stream>>>(blocks,
+                                                                                  k,
+                                                                                  v,
+                                                                                  k_bias,
+                                                                                  v_bias,
+                                                                                  cu_q_len,
+                                                                                  cu_k_len,
+                                                                                  cu_block_num,
+                                                                                  rope_param,
+                                                                                  stride_b,
+                                                                                  stride_c,
+                                                                                  stride_h,
+                                                                                  stride_s,
+                                                                                  layer_id,
+                                                                                  cp_rank,
+                                                                                  cp_size,
+                                                                                  block_layout);
     };
 
     auto dispatch = [&](auto tkv) {
@@ -283,13 +291,13 @@ void invokeProcessKV_v2(char**                 blocks,
     };
 
     if (quant_policy & QuantPolicy::kCacheKVInt8) {
-        dispatch(uint8_t{});
+        dispatch(KvQuantInt8{});
     }
     else if (quant_policy & QuantPolicy::kCacheKVInt4) {
-        dispatch(uint4_t{});
+        dispatch(KvQuantInt4{});
     }
     else {
-        dispatch(T{});
+        dispatch(KvQuantNone{});
     }
 
     TM_CUDA_CHECK(cudaGetLastError());
@@ -325,22 +333,24 @@ INSTANTIATE_invokeProcessKV_v2(half);
 INSTANTIATE_invokeProcessKV_v2(nv_bfloat16);
 #endif
 
-template<int CTA_S, int HeadDim, int WarpCnt, class T, class Tkv, class BlockLayout>
-__global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
-                                                    T*              v,
-                                                    const Tkv**     blocks,
-                                                    const int*      cu_k_len,
-                                                    const int*      cu_block_num,
-                                                    RopeKernelParam rope_param,
-                                                    int64_t         stride_b,
-                                                    int64_t         stride_c,
-                                                    int64_t         stride_h,
-                                                    int64_t         stride_s,
-                                                    int             layer_id,
-                                                    int             cp_rank,
-                                                    FastDivmod      cp_size,
-                                                    BlockLayout     block_layout)
+template<int CTA_S, int HeadDim, int WarpCnt, class T, class KvQuant, class BlockLayout>
+__global__ void __launch_bounds__(128) flattenKV_v2(T*                                                 k,
+                                                    T*                                                 v,
+                                                    const typename KvQuantTrait<KvQuant, T>::Storage** blocks,
+                                                    const int*                                         cu_k_len,
+                                                    const int*                                         cu_block_num,
+                                                    RopeKernelParam                                    rope_param,
+                                                    int64_t                                            stride_b,
+                                                    int64_t                                            stride_c,
+                                                    int64_t                                            stride_h,
+                                                    int64_t                                            stride_s,
+                                                    int                                                layer_id,
+                                                    int                                                cp_rank,
+                                                    FastDivmod                                         cp_size,
+                                                    BlockLayout                                        block_layout)
 {
+    using Tkv = typename KvQuantTrait<KvQuant, T>::Storage;
+
     constexpr int kVecSize = sizeof(uint4) / sizeof(T);
 
     using Map = RakedThreadMap<HeadDim, CTA_S, kVecSize, WarpCnt>;
@@ -377,7 +387,7 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
 
     blocks += cu_block_num[batch_idx];
 
-    block::Head<T, Tkv, BlockLayout> block_head{block_layout, layer_id, head_idx};
+    block::Head<T, KvQuant, BlockLayout> block_head{block_layout, layer_id, head_idx};
 
     Array<T, 2> param_K[ITER_S];
     Array<T, 2> param_V[ITER_S];
@@ -398,7 +408,7 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*              k,
                         Ldg(vec_V[s][c], &v_cache[di]);
                     }
                 }
-                if constexpr (!std::is_same_v<T, Tkv>) {
+                if constexpr (KvQuantTrait<KvQuant, T>::kQuantKV) {
                     Ldg(param_K[s], k_param);
                     if constexpr (HAS_V) {
                         Ldg(param_V[s], v_param);
@@ -479,7 +489,8 @@ void invokeFlattenKV_v2(T*                     k,
 {
 
     auto invoke = [&](auto tkv, const auto dim) {
-        using Tkv = decltype(tkv);
+        using KvQuant = decltype(tkv);
+        using Tkv     = typename KvQuantTrait<KvQuant, T>::Storage;
 
         constexpr int  kHeadDim = dim;
         constexpr bool kShareKV = kHeadDim == 576;
@@ -492,22 +503,22 @@ void invokeFlattenKV_v2(T*                     k,
 
         TM_CHECK_EQ(head_dim, kHeadDim);
 
-        block::Layout block_layout{block::Config<T, Tkv, kHeadDim, kShareKV>{head_num, block_seq_len}};
+        block::Layout block_layout{block::Config<T, KvQuant, kHeadDim, kShareKV>{head_num, block_seq_len}};
 
-        flattenKV_v2<CTA_S, kHeadDim, kWarpCnt><<<grid, block, 0, stream>>>(k,
-                                                                            v,
-                                                                            (const Tkv**)blocks,
-                                                                            cu_k_len,
-                                                                            cu_block_num,
-                                                                            rope_param,
-                                                                            stride_b,
-                                                                            stride_c,
-                                                                            stride_h,
-                                                                            stride_s,
-                                                                            layer_id,
-                                                                            cp_rank,
-                                                                            cp_size,
-                                                                            block_layout);
+        flattenKV_v2<CTA_S, kHeadDim, kWarpCnt, T, KvQuant><<<grid, block, 0, stream>>>(k,
+                                                                                        v,
+                                                                                        (const Tkv**)blocks,
+                                                                                        cu_k_len,
+                                                                                        cu_block_num,
+                                                                                        rope_param,
+                                                                                        stride_b,
+                                                                                        stride_c,
+                                                                                        stride_h,
+                                                                                        stride_s,
+                                                                                        layer_id,
+                                                                                        cp_rank,
+                                                                                        cp_size,
+                                                                                        block_layout);
     };
 
     auto dispatch = [&](auto tkv) {
@@ -531,13 +542,13 @@ void invokeFlattenKV_v2(T*                     k,
     };
 
     if (quant_policy & QuantPolicy::kCacheKVInt8) {
-        dispatch(uint8_t{});
+        dispatch(KvQuantInt8{});
     }
     else if (quant_policy & QuantPolicy::kCacheKVInt4) {
-        dispatch(uint4_t{});
+        dispatch(KvQuantInt4{});
     }
     else {
-        dispatch(T{});
+        dispatch(KvQuantNone{});
     }
 
     TM_CUDA_CHECK(cudaGetLastError());

@@ -10,23 +10,10 @@
 #include "src/turbomind/kernels/attention/cta_map.h"
 #include "src/turbomind/kernels/attention/decoding_template.h"
 #include "src/turbomind/kernels/attention/kernel.h"
+#include "src/turbomind/kernels/attention/kv_quant_trait.h"
 #include "src/turbomind/kernels/core/common.h"
 
 namespace turbomind::attention {
-
-template<class Tkv>
-constexpr int kv_quant_from_type()
-{
-    if constexpr (std::is_same_v<Tkv, uint8_t>) {
-        return 8;
-    }
-    else if constexpr (std::is_same_v<Tkv, uint4_t>) {
-        return 4;
-    }
-    else {
-        return 0;
-    }
-}
 
 template<class K>
 class KernelImpl: public Kernel {
@@ -42,7 +29,7 @@ public:
         desc_.causal    = K::kCausal;
 
         if constexpr (kIsDecoding) {
-            desc_.kv_quant = kv_quant_from_type<typename K::Tkv>();
+            desc_.kv_quant = KvQuantTrait<typename K::KvQuant, typename K::T>::kv_quant;
             desc_.qh       = K::CTA_H;
             desc_.causal   = true;
         }

@@ -21,71 +21,33 @@
 
 using namespace turbomind;
 
+using attention::KvQuantInt4;
+using attention::KvQuantInt8;
+using attention::KvQuantNone;
+
 // [b, h, s, d] : current -> stride_h=s, stride_s=1, stride_b=hs
 // [cu_q, h, d] : qkvgemm -> stride_h=1, stride_s=h, stride_b=0
 // [h, cu_s, d] : prefill -> stride_h=s, stride_s=1, stride_b=0
 
-template<class T, class Tkv>
-struct Config {
-    int head_dim_;
-    int head_num_;
-    int block_len_;
-
-    TM_HOST_DEVICE constexpr int t_bits() const
-    {
-        if constexpr (std::is_same_v<T, Tkv>) {
-            return 0;
-        }
-        else {
-            return bitsof<T>;
-        }
-    }
-
-    TM_HOST_DEVICE constexpr int q_bits() const
-    {
-        return bitsof<Tkv>;
-    }
-
-    TM_HOST_DEVICE constexpr int head_dim() const
-    {
-        return head_dim_;
-    }
-
-    TM_HOST_DEVICE int head_num() const
-    {
-        return head_num_;
-    }
-
-    TM_HOST_DEVICE constexpr int block_len() const
-    {
-        return block_len_;
-    }
-
-    TM_HOST_DEVICE constexpr bool is_share_kv() const
-    {
-        return false;
-    }
-};
-
 // [S/S, H, S, D] <-> [S/b, H, b, D]
-template<class Tkv, class T>
+template<class KvQuant, class T, int HeadDim>
 void TestBlocks(const thrust::universal_vector<T>& k_cache,        // [B, H, S, D]
                 const thrust::universal_vector<T>& v_cache,        // [B, H, S, D]
                 thrust::universal_vector<char>&    blocks,         // block data
                 thrust::universal_vector<char*>&   k_ptrs,         // block ptrs
                 thrust::universal_vector<int>&     cu_block_cnts,  // cumulative block counts
                 const size_t                       head_num,
-                const size_t                       head_dim,
                 const size_t                       block_seq_len,
                 const size_t                       batch_size,
                 const int                          rope_dim,
                 int                                quant_policy)
 {
-    const size_t seq_len  = k_cache.size() / (head_dim * head_num * batch_size);
-    const size_t n_blocks = (seq_len + block_seq_len - 1) / block_seq_len;
+    constexpr size_t head_dim = HeadDim;
+    const size_t     seq_len  = k_cache.size() / (head_dim * head_num * batch_size);
+    const size_t     n_blocks = (seq_len + block_seq_len - 1) / block_seq_len;
 
-    Config<T, Tkv> config{(int)head_dim, (int)head_num, (int)block_seq_len};
-    block::Layout  layout{config};
+    block::Config<T, KvQuant, HeadDim> config{(int)head_num, (int)block_seq_len};
+    block::Layout                      layout{config};
 
     dump(layout);
 
@@ -285,13 +247,13 @@ int test_attention()
 #endif
 
 #if KV_INT8
-    using Tkv                  = uint8_t;
+    using KvQuantTag           = KvQuantInt8;
     constexpr int kQuantPolicy = QuantPolicy::kCacheKVInt8;
 #elif KV_INT4
-    using Tkv                  = uint4_t;
+    using KvQuantTag           = KvQuantInt4;
     constexpr int kQuantPolicy = QuantPolicy::kCacheKVInt4;
 #else
-    using Tkv                  = T;
+    using KvQuantTag           = KvQuantNone;
     constexpr int kQuantPolicy = 0;
 #endif
 
@@ -367,17 +329,8 @@ int test_attention()
     thrust::universal_vector<char*> k_ptrs;
     thrust::universal_vector<int>   cu_block_cnts;
 
-    TestBlocks<Tkv>(k_cache,
-                    v_cache,
-                    blocks,
-                    k_ptrs,
-                    cu_block_cnts,
-                    KvHeadNum,
-                    kHeadDim,
-                    kBlockSz,
-                    kBatchSize,
-                    kRoPEDim,
-                    kQuantPolicy);
+    TestBlocks<KvQuantTag, T, kHeadDim>(
+        k_cache, v_cache, blocks, k_ptrs, cu_block_cnts, KvHeadNum, kBlockSz, kBatchSize, kRoPEDim, kQuantPolicy);
 
     thrust::universal_vector<T>     output_ref = output;
     thrust::universal_vector<void*> k_cache_ref_ptrs(kBatchSize);

@@ -2,18 +2,20 @@
 
 #pragma once
 
+#include "kv_quant_trait.h"
+
 namespace turbomind {
 
-template<class T, int CTA_S, int HeadDim>
+template<class Tkv, int CTA_S, int HeadDim>
 struct LinearIterator {
 
-    const T* kv_cache_;
-    int      key_to_val_;
+    const Tkv* kv_cache_;
+    int        key_to_val_;
 
-    const T* key_ptr_{};
-    int      tile_id_{};
+    const Tkv* key_ptr_{};
+    int        tile_id_{};
 
-    __device__ LinearIterator(const T* kv_cache, int key_to_val): kv_cache_{kv_cache}, key_to_val_{key_to_val} {}
+    __device__ LinearIterator(const Tkv* kv_cache, int key_to_val): kv_cache_{kv_cache}, key_to_val_{key_to_val} {}
 
     __device__ void SetTile(int tile_id)
     {
@@ -30,7 +32,7 @@ struct LinearIterator {
     }
 
     template<int Index>
-    __device__ const T* OffsetPtr(int offset) const
+    __device__ const Tkv* OffsetPtr(int offset) const
     {
         if constexpr (Index == 0) {
             return key_ptr_ + offset;
@@ -44,9 +46,10 @@ struct LinearIterator {
     }
 };
 
-template<class Tkv_, int CTA_S, int HeadDim>
+template<typename KvQuant_, class T, int CTA_S, int HeadDim>
 struct LinearIteratorFactory {
-    using Tkv = Tkv_;
+    using KvQuant = KvQuant_;
+    using Tkv     = typename attention::KvQuantTrait<KvQuant, T>::Storage;
 
     const Tkv* kv_cache_;
     const int* cu_ctx_len_;

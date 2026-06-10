@@ -18,28 +18,28 @@ constexpr int kHeadDim = 576;
 template<class T>
 using Decoding_F =
     AttentionUniversal<arch::Sm80,
-                       Mainloop<Sm80_CpAsync<2>, Impl<MMA_81616, T, T, 16, 1, 32, 8, 1, 16, kHeadDim, 2>>,
-                       GetBlockIterFactory<T, T, 32, kHeadDim>,
+                       Mainloop<Sm80_CpAsync<2>, Impl<MMA_81616, T, KvQuantNone, 16, 1, 32, 8, 1, 16, kHeadDim, 2>>,
+                       GetBlockIterFactory<T, KvQuantNone, 32, kHeadDim>,
                        DecodingCtaMap>;
 
 // Quant config: CTA_H=8, CTA_S=64, WARP_H=8, WARP_S=16, Stages=5
-template<class T, class Tkv>
+template<class T, class KvQuant>
 using Decoding_Q =
     AttentionUniversal<arch::Sm80,
-                       Mainloop<Sm80_CpAsync<5>, Impl<MMA_81616, T, Tkv, 8, 1, 64, 8, 1, 16, kHeadDim, 5>>,
-                       GetBlockIterFactory<T, Tkv, 64, kHeadDim>,
+                       Mainloop<Sm80_CpAsync<5>, Impl<MMA_81616, T, KvQuant, 8, 1, 64, 8, 1, 16, kHeadDim, 5>>,
+                       GetBlockIterFactory<T, KvQuant, 64, kHeadDim>,
                        DecodingCtaMap>;
 
 namespace {
 Registrar reg([](Collector& c) {
     c.add<Decoding_F<half>>();
-    c.add<Decoding_Q<half, uint8_t>>();
-    c.add<Decoding_Q<half, uint4_t>>();
+    c.add<Decoding_Q<half, KvQuantInt8>>();
+    c.add<Decoding_Q<half, KvQuantInt4>>();
 
 #if ENABLE_BF16
     c.add<Decoding_F<nv_bfloat16>>();
-    c.add<Decoding_Q<nv_bfloat16, uint8_t>>();
-    c.add<Decoding_Q<nv_bfloat16, uint4_t>>();
+    c.add<Decoding_Q<nv_bfloat16, KvQuantInt8>>();
+    c.add<Decoding_Q<nv_bfloat16, KvQuantInt4>>();
 #endif
 });
 }  // namespace

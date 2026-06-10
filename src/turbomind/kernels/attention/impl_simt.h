@@ -4,7 +4,6 @@
 
 #include <limits>
 #include <numeric>
-#include <type_traits>
 
 #include "src/turbomind/kernels/core/array_ops.h"
 #include "src/turbomind/kernels/core/common.h"
@@ -17,7 +16,7 @@
 namespace turbomind::attention {
 
 template<class T_,
-         class Tkv_,
+         class KvQuant_,
          int CTA_H_,
          int CTA_Q_,
          int CTA_S_,
@@ -26,12 +25,13 @@ template<class T_,
          int WARP_S,
          int HeadDim,
          int Stages>
-struct Impl<MMA_SIMT, T_, Tkv_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S, HeadDim, Stages> {
+struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WARP_S, HeadDim, Stages> {
 
-    using T   = T_;
-    using Tkv = Tkv_;
+    using T       = T_;
+    using KvQuant = KvQuant_;
+    using Tkv     = typename KvQuantTrait<KvQuant, T>::Storage;
 
-    static constexpr int kQuantKV = !std::is_same_v<T, Tkv>;
+    static constexpr int kQuantKV = KvQuantTrait<KvQuant, T>::kQuantKV;
 
     static constexpr bool MLA = HeadDim == 576;
 

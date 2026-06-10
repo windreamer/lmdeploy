@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "src/turbomind/kernels/attention/kv_quant_trait.h"
 #include "src/turbomind/kernels/core/common.h"
 #include "src/turbomind/kernels/core/data_type.h"
 #include "src/turbomind/kernels/core/sub_byte_ptr.h"
@@ -12,24 +13,28 @@ namespace turbomind {
 
 namespace block {
 
-template<class T, class Tkv, int HeadDim, bool ShareKV = false>
+using attention::KvQuantTrait;
+
+template<class T, class KvQuant, int HeadDim, bool ShareKV = false>
 struct Config {
+    using Trait = KvQuantTrait<KvQuant, T>;
+
     int head_num_;
     int block_len_;
 
     TM_HOST_DEVICE constexpr int t_bits() const
     {
-        if constexpr (std::is_same_v<T, Tkv>) {
-            return 0;
+        if constexpr (Trait::kQuantKV) {
+            return bitsof<T>;
         }
         else {
-            return bitsof<T>;
+            return 0;
         }
     }
 
     TM_HOST_DEVICE constexpr int q_bits() const
     {
-        return bitsof<Tkv>;
+        return Trait::kBits;
     }
 
     TM_HOST_DEVICE constexpr int head_dim() const
@@ -55,9 +60,11 @@ struct Config {
 
 // Layout -> LayerId -> HeadId -> Timestep -> [Block] -> (k_data, v_data, k_param, v_param)
 
-template<class T, class Tkv, class Layout>
+template<class T, class KvQuant, class Layout>
 class Head {
 public:
+    using Trait = KvQuantTrait<KvQuant, T>;
+    using Tkv   = typename Trait::Storage;
     TM_HOST_DEVICE Head(Layout layout, int layer_id, int head_id):
         layout_{layout}, layer_id_{layer_id}, head_id_{head_id}
     {

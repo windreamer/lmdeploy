@@ -22,36 +22,37 @@ using KT = AttentionUniversal<arch::Sm80, Mainloop_, CacheIter, DecodingCtaMap>;
 
 // T==Tkv, Qh<=2: SIMT, stages=3
 template<class T, int Qh>
-using Decoding_SIMT = KT<Mainloop<Sm80_CpAsync<3>, Impl<MMA_SIMT, T, T, Qh, 1, kCTA_S, Qh, 1, kWARP_S, kHeadDim, 3>>,
-                         GetBlockIterFactory<T, T, kCTA_S, kHeadDim>>;
+using Decoding_SIMT =
+    KT<Mainloop<Sm80_CpAsync<3>, Impl<MMA_SIMT, T, KvQuantNone, Qh, 1, kCTA_S, Qh, 1, kWARP_S, kHeadDim, 3>>,
+       GetBlockIterFactory<T, KvQuantNone, kCTA_S, kHeadDim>>;
 
 // Qh>2: MMA_81616; Stages=3 for T==Tkv, Stages=5 for quant Tkv
 // Qh = (Qh_+7)/8*8: Qh_=3..8→Qh=8, Qh_=9→Qh=16
-template<class T, class Tkv, int Qh, int Stages>
+template<class T, class KvQuant, int Qh, int Stages>
 using Decoding_MMA =
-    KT<Mainloop<Sm80_CpAsync<Stages>, Impl<MMA_81616, T, Tkv, Qh, 1, kCTA_S, Qh, 1, kWARP_S, kHeadDim, Stages>>,
-       GetBlockIterFactory<T, Tkv, kCTA_S, kHeadDim>>;
+    KT<Mainloop<Sm80_CpAsync<Stages>, Impl<MMA_81616, T, KvQuant, Qh, 1, kCTA_S, Qh, 1, kWARP_S, kHeadDim, Stages>>,
+       GetBlockIterFactory<T, KvQuant, kCTA_S, kHeadDim>>;
 
 namespace {
 Registrar reg([](Collector& c) {
     c.add<Decoding_SIMT<half, 1>>();
     c.add<Decoding_SIMT<half, 2>>();
-    c.add<Decoding_MMA<half, half, 8, 3>>();
-    c.add<Decoding_MMA<half, half, 16, 3>>();
-    c.add<Decoding_MMA<half, uint8_t, 8, 5>>();
-    c.add<Decoding_MMA<half, uint8_t, 16, 5>>();
-    c.add<Decoding_MMA<half, uint4_t, 8, 5>>();
-    c.add<Decoding_MMA<half, uint4_t, 16, 5>>();
+    c.add<Decoding_MMA<half, KvQuantNone, 8, 3>>();
+    c.add<Decoding_MMA<half, KvQuantNone, 16, 3>>();
+    c.add<Decoding_MMA<half, KvQuantInt8, 8, 5>>();
+    c.add<Decoding_MMA<half, KvQuantInt8, 16, 5>>();
+    c.add<Decoding_MMA<half, KvQuantInt4, 8, 5>>();
+    c.add<Decoding_MMA<half, KvQuantInt4, 16, 5>>();
 
 #if ENABLE_BF16
     c.add<Decoding_SIMT<nv_bfloat16, 1>>();
     c.add<Decoding_SIMT<nv_bfloat16, 2>>();
-    c.add<Decoding_MMA<nv_bfloat16, nv_bfloat16, 8, 3>>();
-    c.add<Decoding_MMA<nv_bfloat16, nv_bfloat16, 16, 3>>();
-    c.add<Decoding_MMA<nv_bfloat16, uint8_t, 8, 5>>();
-    c.add<Decoding_MMA<nv_bfloat16, uint8_t, 16, 5>>();
-    c.add<Decoding_MMA<nv_bfloat16, uint4_t, 8, 5>>();
-    c.add<Decoding_MMA<nv_bfloat16, uint4_t, 16, 5>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantNone, 8, 3>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantNone, 16, 3>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantInt8, 8, 5>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantInt8, 16, 5>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantInt4, 8, 5>>();
+    c.add<Decoding_MMA<nv_bfloat16, KvQuantInt4, 16, 5>>();
 #endif
 });
 }  // namespace

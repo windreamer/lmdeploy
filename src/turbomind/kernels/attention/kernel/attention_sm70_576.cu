@@ -20,8 +20,8 @@ constexpr int kStages  = 2;
 template<class T, bool Causal = true>
 using KT = AttentionUniversal<
     arch::Sm70,
-    Mainloop<arch::Sm70, Impl<MMA_884, T, T, 1, kCTA_Q, kCTA_S, 1, kWARP_Q, kCTA_S, kHeadDim, kStages>>,
-    LinearIteratorFactory<T, kCTA_S, kHeadDim>,
+    Mainloop<arch::Sm70, Impl<MMA_884, T, KvQuantNone, 1, kCTA_Q, kCTA_S, 1, kWARP_Q, kCTA_S, kHeadDim, kStages>>,
+    LinearIteratorFactory<KvQuantNone, T, kCTA_S, kHeadDim>,
     AttentionCtaMap,
     Causal>;
 

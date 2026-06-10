@@ -5,6 +5,7 @@
 #include <limits>
 #include <type_traits>
 
+#include "kv_quant_trait.h"
 #include "quantization.h"
 
 #include "src/turbomind/kernels/attention/rotary_embedding.h"
@@ -23,8 +24,9 @@ struct DecodingCtaMap;
 template<class Arch_, class Mainloop, class CacheIteratorFactory_, class CtaMap_, bool Causal_ = true>
 struct AttentionUniversal {
 
-    using T   = typename Mainloop::T;
-    using Tkv = typename Mainloop::Tkv;
+    using T       = typename Mainloop::T;
+    using KvQuant = typename Mainloop::Impl::KvQuant;
+    using Tkv     = typename Mainloop::Tkv;
 
     using Impl = typename Mainloop::Impl;
 
@@ -266,10 +268,10 @@ struct AttentionUniversal {
             Array<T, 2> param_K[1];
             Array<T, 2> param_V[1];
 
-            if constexpr (!std::is_same_v<T, Tkv>) {
-                warp_stats<Map::kWarpThreadC>(param_K, vec_K, bitsof<Tkv>);
+            if constexpr (attention::KvQuantTrait<KvQuant, T>::kQuantKV) {
+                warp_stats<Map::kWarpThreadC>(param_K, vec_K, attention::KvQuantTrait<KvQuant, T>::kBits);
                 if constexpr (HAS_V) {
-                    warp_stats<Map::kWarpThreadC>(param_V, vec_V, bitsof<Tkv>);
+                    warp_stats<Map::kWarpThreadC>(param_V, vec_V, attention::KvQuantTrait<KvQuant, T>::kBits);
                 }
             }
 
@@ -301,7 +303,7 @@ struct AttentionUniversal {
                             }
                         }
                     }
-                    if constexpr (!std::is_same_v<T, Tkv>) {
+                    if constexpr (attention::KvQuantTrait<KvQuant, T>::kQuantKV) {
                         if (qi < CTA_Q && offset.x == 0) {
                             StoreQuantParam<Tkv>(k_param, param_K[0]);
                             if constexpr (HAS_V) {

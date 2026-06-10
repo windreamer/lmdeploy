@@ -3,6 +3,7 @@
 #pragma once
 
 #include "iterator_sm80.h"
+#include "kv_quant_trait.h"
 #include "mainloop.h"
 #include "src/turbomind/kernels/core/pipe_iter.h"
 #include <cuda_pipeline_primitives.h>
@@ -38,8 +39,8 @@ struct Mainloop<Sm80_CpAsync<Stages>, Impl_> {
     using CombinedIterV =
         CombinedIterator<GmemIterV_, Sm80GmemIterator<T, typename Impl::ThreadMapKVp, typename Impl::SmemLayoutKVp, 3>>;
 
-    using GmemIterK = std::conditional_t<std::is_same_v<T, Tkv>, GmemIterK_, CombinedIterK>;
-    using GmemIterV = std::conditional_t<std::is_same_v<T, Tkv>, GmemIterV_, CombinedIterV>;
+    using GmemIterK = std::conditional_t<!KvQuantTrait<typename Impl::KvQuant, T>::kQuantKV, GmemIterK_, CombinedIterK>;
+    using GmemIterV = std::conditional_t<!KvQuantTrait<typename Impl::KvQuant, T>::kQuantKV, GmemIterV_, CombinedIterV>;
 
     using FragQ = typename Impl::FragQ;
     using FragS = typename Impl::FragS;
