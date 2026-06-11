@@ -11,6 +11,7 @@
 #include "src/turbomind/kernels/core/thread_map.h"
 
 #include "src/turbomind/kernels/attention/impl.h"
+#include "src/turbomind/kernels/attention/kv_quant_dequant.h"
 #include "src/turbomind/kernels/attention/quantization.h"
 
 namespace turbomind::attention {
@@ -316,10 +317,18 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
 
         __device__ void Transform(int n)
         {
-            PRAGMA_UNROLL
-            for (int k = 0; k < K_K; ++k) {
-                ConvertKvCache<TK, Tqk> convert(param_K[n][0], param_K[n][1]);
-                frag_K[n][k] = convert(data_K[n][k]);
+            if constexpr (!kQuantKV) {
+                PRAGMA_UNROLL
+                for (int k = 0; k < K_K; ++k) {
+                    frag_K[n][k] = ConvertKvCache<TK, Tqk>::convert(data_K[n][k]);
+                }
+            }
+            else {
+                PRAGMA_UNROLL
+                for (int k = 0; k < K_K; ++k) {
+                    frag_K[n][k] =
+                        KvQuantTrait<KvQuant, T>::DequantK::convert(data_K[n][k], param_K[n][0], param_K[n][1]);
+                }
             }
         }
     };
@@ -415,10 +424,18 @@ struct Impl<MMA_SIMT, T_, KvQuant_, CTA_H_, CTA_Q_, CTA_S_, WARP_H_, WARP_Q, WAR
 
         __device__ void Transform(int k)
         {
-            PRAGMA_UNROLL
-            for (int n = 0; n < V_N; ++n) {
-                ConvertKvCache<TV, Tpv> convert(param_V[k][0], param_V[k][1]);
-                frag_V[k][n] = convert(data_V[k][n]);
+            if constexpr (!kQuantKV) {
+                PRAGMA_UNROLL
+                for (int n = 0; n < V_N; ++n) {
+                    frag_V[k][n] = ConvertKvCache<TV, Tpv>::convert(data_V[k][n]);
+                }
+            }
+            else {
+                PRAGMA_UNROLL
+                for (int n = 0; n < V_N; ++n) {
+                    frag_V[k][n] =
+                        KvQuantTrait<KvQuant, T>::DequantV::convert(data_V[k][n], param_V[k][0], param_V[k][1]);
+                }
             }
         }
     };

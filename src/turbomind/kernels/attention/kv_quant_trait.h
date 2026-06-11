@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "src/turbomind/kernels/core/array.h"
 #include "src/turbomind/kernels/core/data_type.h"
 #include "src/turbomind/kernels/core/sub_byte_ptr.h"
 #include <type_traits>
@@ -17,6 +18,9 @@ struct KvQuantInt4 {
 
 template<typename T>
 struct AffineDequant {
+    template<int N, typename TK>
+    __device__ static Array<T, N> convert(const Array<TK, N>& raw, T p0, T p1);
+
     __device__ static T apply(T val, T scale, T zero, int /*head_dim*/)
     {
         return val * scale + zero;

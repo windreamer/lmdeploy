@@ -4,6 +4,7 @@
 
 #include "src/turbomind/kernels/attention/block.h"
 #include "src/turbomind/kernels/attention/kv_cache_utils_v2.h"
+#include "src/turbomind/kernels/attention/kv_quant_dequant.h"
 #include "src/turbomind/kernels/attention/kv_quant_trait.h"
 #include "src/turbomind/kernels/attention/quantization.h"
 #include "src/turbomind/kernels/attention/rotary_embedding.h"
@@ -418,15 +419,16 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*                          
         }
     }
 
+    using DequantK = typename KvQuantTrait<KvQuant, T>::DequantK;
+    using DequantV = typename KvQuantTrait<KvQuant, T>::DequantV;
+
     PRAGMA_UNROLL
     for (int s = 0; s < ITER_S; ++s) {
-        ConvertKvCache<TK, T> conv_K{param_K[s][0], param_K[s][1]};
-        ConvertKvCache<TV, T> conv_V{param_V[s][0], param_V[s][1]};
         PRAGMA_UNROLL
         for (int c = 0; c < ITER_C; ++c) {
-            out_K[s][c] = conv_K(vec_K[s][c]);
+            out_K[s][c] = DequantK::convert(vec_K[s][c], param_K[s][0], param_K[s][1]);
             if constexpr (HAS_V) {
-                out_V[s][c] = conv_V(vec_V[s][c]);
+                out_V[s][c] = DequantV::convert(vec_V[s][c], param_V[s][0], param_V[s][1]);
             }
         }
     }
