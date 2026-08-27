@@ -85,10 +85,20 @@ def _scripted_events() -> dict[int, dict]:
         },
     }
 
-
 class TestGptOssResponseParser:
     """Unit tests for :class:`GptOssResponseParser` (Harmony token
     streaming)."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_get_encoding(self, monkeypatch):
+        """Prevent ``get_encoding`` from loading the real Harmony vocab, which
+        is unavailable in some test environments."""
+        monkeypatch.setattr(openai_harmony_mod, 'get_encoding', lambda: None)
+        monkeypatch.setattr(
+            openai_harmony_mod,
+            'StreamableParser',
+            lambda *args, **kwargs: _FakeStreamableParser({}),
+        )
 
     def test_stream_chunk_full_sequence(self, monkeypatch):
         monkeypatch.setattr(
@@ -184,7 +194,7 @@ class TestGptOssResponseParser:
                 },
                 'description': None,
             },
-        }]
+            }]
 
     def test_parse_complete_full_sequence(self, monkeypatch):
         monkeypatch.setattr(
@@ -337,9 +347,9 @@ class TestGptOssResponseParser:
         assert gpt_oss_mod.GptOssResponseParser._extract_tool_name(recipient) == expected
 
 
-class TestGptOssResponseFormatHarmonyConversion:
-    """Tests for
-    :meth:`GptOssResponseParser._convert_response_format_to_harmony`."""
+class TestGptOssResponseFormatGrammarConversion:
+    """Tests for GptOssResponseParser response_format → structural_tag
+    conversion (replaces the old Harmony-native prompt injection)."""
 
     @pytest.fixture(autouse=True)
     def _patch_streamable_parser(self, monkeypatch):
@@ -348,28 +358,11 @@ class TestGptOssResponseFormatHarmonyConversion:
             'StreamableParser',
             lambda *args, **kwargs: _FakeStreamableParser({}),
         )
+        monkeypatch.setattr(openai_harmony_mod, 'get_encoding', lambda: None)
 
-    def test_response_format_cleared_after_conversion(self):
-        """response_format must be None after the parser processes it."""
-        from lmdeploy.serve.openai.protocol import JsonSchema, ResponseFormat
-
-        request = ChatCompletionRequest(
-            model='openai/gpt-oss-20b',
-            messages=[{'role': 'user', 'content': 'hi'}],
-            response_format=ResponseFormat(
-                type='json_schema',
-                json_schema=JsonSchema(
-                    name='test',
-                    schema={'type': 'object', 'properties': {'x': {'type': 'integer'}}},
-                ),
-            ),
-        )
-        parser = gpt_oss_mod.GptOssResponseParser(request=request)
-        assert parser.request.response_format is None
-
-    def test_schema_appended_to_existing_system_message(self):
-        """When a system message already exists the schema is appended to
-        it."""
+    def test_json_schema_converted_to_structural_tag(self):
+        """json_schema response_format is converted to a structural_tag, not
+        cleared."""
         import json as _json
 
         from lmdeploy.serve.openai.protocol import JsonSchema, ResponseFormat
@@ -377,38 +370,6 @@ class TestGptOssResponseFormatHarmonyConversion:
         schema_dict = {'type': 'object', 'properties': {'x': {'type': 'integer'}}}
         request = ChatCompletionRequest(
             model='openai/gpt-oss-20b',
-            messages=[
-                {'role': 'system', 'content': 'You are helpful.'},
-                {'role': 'user', 'content': 'hi'},
-            ],
-            response_format=ResponseFormat(
-                type='json_schema',
-                json_schema=JsonSchema(name='test', schema=schema_dict),
-            ),
-        )
-        parser = gpt_oss_mod.GptOssResponseParser(request=request)
-
-        msgs = parser.request.messages
-        assert msgs[0]['role'] == 'system'
-        assert parser.request.response_format is None
-        # The schema body must appear in the system message
-        assert '# Response Formats' in msgs[0]['content']
-        assert _json.dumps(schema_dict) in msgs[0]['content']
-        # The original content is preserved before the appended section
-        assert msgs[0]['content'].startswith('You are helpful.')
-        # No leading blank lines in the appended section
-        assert '\n\n# Response Formats' in msgs[0]['content']
-
-    def test_schema_inserted_as_new_system_message_when_none_exists(self):
-        """When no system message exists a new one is inserted at position
-        0."""
-        import json as _json
-
-        from lmdeploy.serve.openai.protocol import JsonSchema, ResponseFormat
-
-        schema_dict = {'type': 'object', 'properties': {'name': {'type': 'string'}}}
-        request = ChatCompletionRequest(
-            model='openai/gpt-oss-20b',
             messages=[{'role': 'user', 'content': 'hi'}],
             response_format=ResponseFormat(
                 type='json_schema',
@@ -417,17 +378,49 @@ class TestGptOssResponseFormatHarmonyConversion:
         )
         parser = gpt_oss_mod.GptOssResponseParser(request=request)
 
-        msgs = parser.request.messages
-        assert msgs[0]['role'] == 'system'
-        assert parser.request.response_format is None
-        # New system message content must NOT start with blank lines
-        assert not msgs[0]['content'].startswith('\n')
-        assert msgs[0]['content'].startswith('# Response Formats')
-        assert _json.dumps(schema_dict) in msgs[0]['content']
-        # The user message is still present after the inserted system message
-        assert msgs[1]['role'] == 'user'
+        rf = parser.request.response_format
+        assert rf is not None
+        assert rf['type'] == 'structural_tag'
+        assert rf['structural_tag'] is not None
+        # The structural_tag JSON must contain the original schema
+        st_json = _json.dumps(rf['structural_tag'])
+        assert _json.dumps(schema_dict) in st_json
+        # Messages must NOT be modified (no prompt injection)
+        assert len(parser.request.messages) == 1
+        assert parser.request.messages[0]['role'] == 'user'
 
-    def test_text_response_format_is_cleared_by_normalize(self):
+    def test_regex_schema_converted_to_structural_tag(self):
+        from lmdeploy.serve.openai.protocol import ResponseFormat
+
+        request = ChatCompletionRequest(
+            model='openai/gpt-oss-20b',
+            messages=[{'role': 'user', 'content': 'hi'}],
+            response_format=ResponseFormat(type='regex_schema', regex_schema='[0-9]+'),
+        )
+        parser = gpt_oss_mod.GptOssResponseParser(request=request)
+
+        rf = parser.request.response_format
+        assert rf is not None
+        assert rf['type'] == 'structural_tag'
+        assert rf['structural_tag'] is not None
+
+    def test_json_object_converted_to_structural_tag(self):
+        from lmdeploy.serve.openai.protocol import ResponseFormat
+
+        request = ChatCompletionRequest(
+            model='openai/gpt-oss-20b',
+            messages=[{'role': 'user', 'content': 'hi'}],
+            response_format=ResponseFormat(type='json_object'),
+        )
+        parser = gpt_oss_mod.GptOssResponseParser(request=request)
+
+        rf = parser.request.response_format
+        assert rf is not None
+        assert rf['type'] == 'structural_tag'
+        assert rf['structural_tag'] is not None
+
+    def test_text_response_format_is_cleared(self):
+        """Text response_format is cleared (no grammar needed)."""
         from lmdeploy.serve.openai.protocol import ResponseFormat
 
         request = ChatCompletionRequest(
@@ -448,33 +441,33 @@ class TestGptOssResponseFormatHarmonyConversion:
         assert parser.request.response_format is None
         assert len(parser.request.messages) == 1
 
-    def test_str_messages_gets_schema_appended(self):
-        """When messages is a string, the schema section is appended to it."""
-        import json as _json
-
+    def test_structural_tag_preserves_final_channel_begin(self):
+        """The structural_tag must contain the Harmony final channel begin
+        string so the grammar wraps the schema correctly."""
         from lmdeploy.serve.openai.protocol import JsonSchema, ResponseFormat
 
-        schema_dict = {'type': 'object', 'properties': {'x': {'type': 'integer'}}}
         request = ChatCompletionRequest(
             model='openai/gpt-oss-20b',
-            messages='Tell me a joke',
+            messages=[{'role': 'user', 'content': 'hi'}],
             response_format=ResponseFormat(
                 type='json_schema',
-                json_schema=JsonSchema(name='test', schema=schema_dict),
+                json_schema=JsonSchema(
+                    name='test',
+                    schema={'type': 'object', 'properties': {'x': {'type': 'integer'}}},
+                ),
             ),
         )
         parser = gpt_oss_mod.GptOssResponseParser(request=request)
 
-        assert parser.request.response_format is None
-        assert isinstance(parser.request.messages, str)
-        assert parser.request.messages.startswith('Tell me a joke')
-        assert '# Response Formats' in parser.request.messages
-        assert _json.dumps(schema_dict) in parser.request.messages
-
-    def test_non_pydantic_request_messages_updated(self):
-        """Non-Pydantic sentinel requests also get messages updated."""
         import json as _json
+        st_json = _json.dumps(parser.request.response_format['structural_tag'])
+        assert '<|channel|>final<|message|>' in st_json
+        assert '<|end|>' in st_json
+        assert '<|channel|>analysis<|message|>' in st_json
 
+    def test_non_pydantic_request_gets_structural_tag(self):
+        """Non-Pydantic sentinel requests also get response_format
+        converted."""
         from lmdeploy.serve.openai.protocol import JsonSchema, ResponseFormat
 
         schema_dict = {'type': 'object', 'properties': {'y': {'type': 'number'}}}
@@ -483,8 +476,6 @@ class TestGptOssResponseFormatHarmonyConversion:
             json_schema=JsonSchema(name='test', schema=schema_dict),
         )
 
-        # Sentinel must NOT have tools/tool_choice attrs so that __init__
-        # skips the Pydantic-dependent tool-rendering branch.
         class _Sentinel:
             messages = [{'role': 'user', 'content': 'hi'}]
             response_format = fmt
@@ -492,30 +483,27 @@ class TestGptOssResponseFormatHarmonyConversion:
         sentinel = _Sentinel()
         parser = gpt_oss_mod.GptOssResponseParser(request=sentinel)
 
-        assert parser.request.response_format is None
-        msgs = parser.request.messages
-        assert isinstance(msgs, list)
-        assert msgs[0]['role'] == 'system'
-        assert '# Response Formats' in msgs[0]['content']
-        assert _json.dumps(schema_dict) in msgs[0]['content']
+        assert parser.request.response_format is not None
+        assert parser.request.response_format.type == 'structural_tag'
 
-    def test_list_content_system_message_gets_text_block_appended(self):
-        """When system message content is a list (multimodal), append a text
-        block."""
+    def test_grammar_failure_falls_back_to_prompt_injection(self, monkeypatch):
+        """When xgrammar is unavailable, response_format is injected into the
+        system prompt and cleared (legacy Harmony-native fallback)."""
         import json as _json
 
         from lmdeploy.serve.openai.protocol import JsonSchema, ResponseFormat
 
-        schema_dict = {'type': 'object', 'properties': {'z': {'type': 'boolean'}}}
+        # Simulate grammar construction failure
+        monkeypatch.setattr(
+            gpt_oss_mod.GptOssResponseParser,
+            '_build_response_format_grammar',
+            staticmethod(lambda fmt: None),
+        )
+
+        schema_dict = {'type': 'object', 'properties': {'x': {'type': 'integer'}}}
         request = ChatCompletionRequest(
             model='openai/gpt-oss-20b',
-            messages=[
-                {'role': 'system', 'content': [
-                    {'type': 'text', 'text': 'You are helpful.'},
-                    {'type': 'image_url', 'image_url': {'url': 'http://example.com/img.png'}},
-                ]},
-                {'role': 'user', 'content': 'hi'},
-            ],
+            messages=[{'role': 'user', 'content': 'hi'}],
             response_format=ResponseFormat(
                 type='json_schema',
                 json_schema=JsonSchema(name='test', schema=schema_dict),
@@ -523,44 +511,179 @@ class TestGptOssResponseFormatHarmonyConversion:
         )
         parser = gpt_oss_mod.GptOssResponseParser(request=request)
 
+        # response_format must be cleared
         assert parser.request.response_format is None
-        sys_msg = parser.request.messages[0]
-        assert sys_msg['role'] == 'system'
-        content = sys_msg['content']
-        assert isinstance(content, list)
-        assert len(content) == 3
-        # Original two blocks preserved
-        assert content[0]['type'] == 'text'
-        assert content[0]['text'] == 'You are helpful.'
-        assert content[1]['type'] == 'image_url'
-        # Schema appended as a text block
-        assert content[2]['type'] == 'text'
-        assert '# Response Formats' in content[2]['text']
-        assert _json.dumps(schema_dict) in content[2]['text']
+        # A system message with the schema must have been inserted
+        msgs = parser.request.messages
+        assert msgs[0]['role'] == 'system'
+        assert '# Response Formats' in msgs[0]['content']
+        assert _json.dumps(schema_dict) in msgs[0]['content']
 
-    def test_none_content_system_message_inserts_separate_system(self):
-        """When system message content is None, insert a new system message."""
+
+class TestGptOssToolGrammarInjection:
+    """Tests for GptOssResponseParser tool-calling structural_tag injection."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_streamable_parser(self, monkeypatch):
+        monkeypatch.setattr(
+            openai_harmony_mod,
+            'StreamableParser',
+            lambda *args, **kwargs: _FakeStreamableParser({}),
+        )
+        monkeypatch.setattr(openai_harmony_mod, 'get_encoding', lambda: None)
+
+    def test_required_tool_choice_injects_structural_tag(self):
+        """tool_choice=required injects a structural_tag with tool call
+        grammar."""
+        import json as _json
+
+        request = ChatCompletionRequest(
+            model='openai/gpt-oss-20b',
+            messages=[{'role': 'user', 'content': 'What is the weather?'}],
+            tools=[{
+                'type': 'function',
+                'function': {
+                    'name': 'get_weather',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {'location': {'type': 'string'}},
+                    },
+                },
+            }],
+            tool_choice='required',
+        )
+        parser = gpt_oss_mod.GptOssResponseParser(request=request)
+
+        rf = parser.request.response_format
+        assert rf is not None
+        assert rf['type'] == 'structural_tag'
+        assert rf['structural_tag'] is not None
+        st_json = _json.dumps(rf['structural_tag'])
+        # Must contain Harmony tool call begin strings
+        assert 'functions.get_weather' in st_json
+        assert '<|call|>' in st_json
+        assert '<|constrain|>json' in st_json
+
+    def test_auto_tool_choice_injects_structural_tag(self):
+        """tool_choice=auto also injects a structural_tag (with final channel
+        fallback)."""
+        import json as _json
+
+        request = ChatCompletionRequest(
+            model='openai/gpt-oss-20b',
+            messages=[{'role': 'user', 'content': 'What is the weather?'}],
+            tools=[{
+                'type': 'function',
+                'function': {
+                    'name': 'get_weather',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {'location': {'type': 'string'}},
+                    },
+                },
+            }],
+            tool_choice='auto',
+        )
+        parser = gpt_oss_mod.GptOssResponseParser(request=request)
+
+        rf = parser.request.response_format
+        assert rf is not None
+        assert rf['type'] == 'structural_tag'
+        st_json = _json.dumps(rf['structural_tag'])
+        assert 'functions.get_weather' in st_json
+        # auto mode should also allow final channel content
+        assert '<|channel|>final' in st_json
+
+    def test_specific_tool_choice_injects_structural_tag(self):
+        """tool_choice={"type":"function","function":{"name":"X"}} injects
+        grammar for only that function."""
+        import json as _json
+
+        request = ChatCompletionRequest(
+            model='openai/gpt-oss-20b',
+            messages=[{'role': 'user', 'content': 'What is the weather?'}],
+            tools=[
+                {
+                    'type': 'function',
+                    'function': {
+                        'name': 'get_weather',
+                        'parameters': {'type': 'object', 'properties': {}},
+                    },
+                },
+                {
+                    'type': 'function',
+                    'function': {
+                        'name': 'get_time',
+                        'parameters': {'type': 'object', 'properties': {}},
+                    },
+                },
+            ],
+            tool_choice={
+                'type': 'function',
+                'function': {'name': 'get_weather'},
+            },
+        )
+        parser = gpt_oss_mod.GptOssResponseParser(request=request)
+
+        rf = parser.request.response_format
+        assert rf is not None
+        assert rf['type'] == 'structural_tag'
+        st_json = _json.dumps(rf['structural_tag'])
+        assert 'functions.get_weather' in st_json
+        # The non-selected tool should NOT appear
+        assert 'functions.get_time' not in st_json
+
+    def test_none_tool_choice_does_not_inject_grammar(self):
+        """tool_choice=none does not inject tool grammar."""
+        request = ChatCompletionRequest(
+            model='openai/gpt-oss-20b',
+            messages=[{'role': 'user', 'content': 'hi'}],
+            tools=[{
+                'type': 'function',
+                'function': {
+                    'name': 'get_weather',
+                    'parameters': {'type': 'object', 'properties': {}},
+                },
+            }],
+            tool_choice='none',
+        )
+        parser = gpt_oss_mod.GptOssResponseParser(request=request)
+
+        # No grammar should be injected for tool_choice=none
+        rf = parser.request.response_format
+        assert rf is None or rf['type'] != 'structural_tag'
+
+    def test_tools_priority_over_response_format(self):
+        """When both tools and response_format are present, tool grammar takes
+        priority."""
         import json as _json
 
         from lmdeploy.serve.openai.protocol import JsonSchema, ResponseFormat
 
-        schema_dict = {'type': 'object', 'properties': {'w': {'type': 'string'}}}
         request = ChatCompletionRequest(
             model='openai/gpt-oss-20b',
-            messages=[
-                {'role': 'system', 'content': None},
-                {'role': 'user', 'content': 'hi'},
-            ],
+            messages=[{'role': 'user', 'content': 'hi'}],
+            tools=[{
+                'type': 'function',
+                'function': {
+                    'name': 'get_weather',
+                    'parameters': {'type': 'object', 'properties': {}},
+                },
+            }],
+            tool_choice='required',
             response_format=ResponseFormat(
                 type='json_schema',
-                json_schema=JsonSchema(name='test', schema=schema_dict),
+                json_schema=JsonSchema(
+                    name='test',
+                    schema={'type': 'object', 'properties': {'x': {'type': 'integer'}}},
+                ),
             ),
         )
         parser = gpt_oss_mod.GptOssResponseParser(request=request)
 
-        assert parser.request.response_format is None
-        msgs = parser.request.messages
-        # A new system message with the schema is inserted at position 0
-        assert msgs[0]['role'] == 'system'
-        assert '# Response Formats' in msgs[0]['content']
-        assert _json.dumps(schema_dict) in msgs[0]['content']
+        rf = parser.request.response_format
+        assert rf is not None
+        assert rf['type'] == 'structural_tag'
+        st_json = _json.dumps(rf['structural_tag'])
+        # Tool grammar wins — must contain tool call, not plain json_schema
+        assert 'functions.get_weather' in st_json
