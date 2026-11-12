@@ -149,8 +149,8 @@ class CudaOpsBackend(DefaultOpsBackend):
             from .gated_delta_rule import CudaGatedDeltaMetaImpl
             return cast(ImplT, CudaGatedDeltaMetaImpl(indexed_state=spec.indexed_state))
         if isinstance(spec, GatedDeltaRuleBuildSpec):
-            from .gated_delta_rule import CudaGatedDeltaRuleImpl
-            return cast(ImplT, CudaGatedDeltaRuleImpl(indexed_state=spec.indexed_state))
+            from .gated_delta_rule import _build_gated_delta_rule
+            return cast(ImplT, _build_gated_delta_rule(spec))
         if isinstance(spec, LinearW4A16BuildSpec):
             from .awq_modules import _build_linear_w4a16
             return cast(ImplT, _build_linear_w4a16(spec))

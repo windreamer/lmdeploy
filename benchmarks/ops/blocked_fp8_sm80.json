@@ -1,0 +1,100 @@
+[
+  {
+    "family": "blocked_fp8",
+    "impl": "turbomind-family15-vs-triton",
+    "device": "NVIDIA A100-SXM4-80GB",
+    "capability": [
+      8,
+      0
+    ],
+    "shapes": [
+      {
+        "M": 1,
+        "K": 4096,
+        "N": 4096,
+        "scale_layout": "128x1"
+      },
+      {
+        "M": 128,
+        "K": 4096,
+        "N": 11008,
+        "scale_layout": "128x1"
+      },
+      {
+        "M": 4096,
+        "K": 4096,
+        "N": 4096,
+        "scale_layout": "128x1"
+      },
+      {
+        "M": 4096,
+        "K": 11008,
+        "N": 4096,
+        "scale_layout": "128x1"
+      }
+    ],
+    "timings_us": {
+      "M1_K4096_N4096_bo1_turbomind": 78.62271785736084,
+      "M1_K4096_N4096_bo1_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")",
+      "M128_K4096_N11008_bo1_turbomind": 82.67775535583496,
+      "M128_K4096_N11008_bo1_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")",
+      "M4096_K4096_N4096_bo1_turbomind": 552.0383834838867,
+      "M4096_K4096_N4096_bo1_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")",
+      "M4096_K11008_N4096_bo1_turbomind": 1520.9266662597656,
+      "M4096_K11008_N4096_bo1_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")"
+    },
+    "git_sha": "bb3a5ae5376ec3e01f6fda88d789b5790f6095b0",
+    "timestamp": "2026-11-12T23:13:12+0800",
+    "torch_version": "2.12.1+cu130",
+    "triton_version": "3.7.1"
+  },
+  {
+    "family": "blocked_fp8",
+    "impl": "turbomind-family15-vs-triton",
+    "device": "NVIDIA A100-SXM4-80GB",
+    "capability": [
+      8,
+      0
+    ],
+    "shapes": [
+      {
+        "M": 1,
+        "K": 4096,
+        "N": 4096,
+        "scale_layout": "128x128"
+      },
+      {
+        "M": 128,
+        "K": 4096,
+        "N": 11008,
+        "scale_layout": "128x128"
+      },
+      {
+        "M": 4096,
+        "K": 4096,
+        "N": 4096,
+        "scale_layout": "128x128"
+      },
+      {
+        "M": 4096,
+        "K": 11008,
+        "N": 4096,
+        "scale_layout": "128x128"
+      }
+    ],
+    "timings_us": {
+      "M1_K4096_N4096_bo128_turbomind": 76.8614387512207,
+      "M1_K4096_N4096_bo128_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")",
+      "M128_K4096_N11008_bo128_turbomind": 92.46720314025879,
+      "M128_K4096_N11008_bo128_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")",
+      "M4096_K4096_N4096_bo128_turbomind": 578.7443161010742,
+      "M4096_K4096_N4096_bo128_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")",
+      "M4096_K11008_N4096_bo128_turbomind": 1498.6650085449219,
+      "M4096_K11008_N4096_bo128_triton": "unavailable: at 1:0:\ndef _quant_fp8_kernel(\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")"
+    },
+    "git_sha": "bb3a5ae5376ec3e01f6fda88d789b5790f6095b0",
+    "timestamp": "2026-11-12T23:13:13+0800",
+    "torch_version": "2.12.1+cu130",
+    "triton_version": "3.7.1"
+  }
+]
