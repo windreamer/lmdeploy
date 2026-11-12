@@ -35,7 +35,19 @@ class CudaCacheBackend(DefaultCacheBackend):
     @classmethod
     def build_block_copy(cls, allocation: CacheAllocation, num_logical_blocks: int,
                          pages_per_block: int):
-        """Build the Triton allocation-aware copy primitive."""
+        """Build the Triton allocation-aware copy primitive, or the
+        TurboMind GenericCopy one when LMDEPLOY_TURBOMIND_OPS forces
+        ``copy_cache`` (opt-in; no factory-table row ships, so ``auto``
+        and ``off`` always build the Triton path unchanged)."""
+        from ..tm_ops import resolve_tm
+        from .turbomind_cache import TurbomindBlockCacheCopy, turbomind_copy_gate_reason
+
+        capability = torch.cuda.get_device_capability(allocation.pools[0].tensor.device)
+        decision = resolve_tm('copy_cache',
+                              capability,
+                              lambda: turbomind_copy_gate_reason(allocation.pools))
+        if decision.selected:
+            return TurbomindBlockCacheCopy(allocation, num_logical_blocks, pages_per_block)
         return CudaBlockCacheCopy(allocation, num_logical_blocks, pages_per_block)
 
     @staticmethod
