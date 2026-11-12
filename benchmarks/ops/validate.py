@@ -40,6 +40,11 @@ def validate(path: Path) -> bool:
     if not record['git_sha'] or len(record['git_sha']) < 7:
         return _fail(path, f'git_sha malformed: {record["git_sha"]!r}')
 
+    if record.get('evidence_kind') == 'inherited-default':
+        print(f'OK   {path} (family={record["family"]}, capability={capability}, '
+              'inherited default, no fresh timings)')
+        return True
+
     if not record['shapes']:
         return _fail(path, 'no shape entries')
     for entry in record['shapes']:

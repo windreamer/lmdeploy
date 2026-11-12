@@ -1,0 +1,71 @@
+{
+  "family": "w4a16",
+  "device": {
+    "name": "NVIDIA A100-SXM4-80GB",
+    "capability": [
+      8,
+      0
+    ],
+    "multi_processor_count": 108,
+    "total_memory_gb": 79.3
+  },
+  "git_sha": "a95d2530b75f908c0b11e42e3e2d97087c00613b",
+  "dtype": "float16",
+  "group_size": 128,
+  "shapes": [
+    {
+      "batch": 1,
+      "in_features": 4096,
+      "out_features": 4096,
+      "impls": {
+        "turbomind_ms": 0.07151534780859947,
+        "triton_ms": 0.0838794931769371
+      }
+    },
+    {
+      "batch": 8,
+      "in_features": 4096,
+      "out_features": 4096,
+      "impls": {
+        "turbomind_ms": 0.07087633945047855,
+        "triton_ms": 0.0834740698337555
+      }
+    },
+    {
+      "batch": 64,
+      "in_features": 4096,
+      "out_features": 4096,
+      "impls": {
+        "turbomind_ms": 0.07113826461136341,
+        "triton_ms": 0.0837535597383976
+      }
+    },
+    {
+      "batch": 1,
+      "in_features": 4096,
+      "out_features": 11008,
+      "impls": {
+        "turbomind_ms": 0.07063928060233593,
+        "triton_ms": 0.08407780900597572
+      }
+    },
+    {
+      "batch": 8,
+      "in_features": 4096,
+      "out_features": 11008,
+      "impls": {
+        "turbomind_ms": 0.10383401997387409,
+        "triton_ms": 0.12899410910904408
+      }
+    },
+    {
+      "batch": 1,
+      "in_features": 512,
+      "out_features": 1024,
+      "impls": {
+        "turbomind_ms": 0.0723631214350462,
+        "triton_ms": 0.08318183943629265
+      }
+    }
+  ]
+}

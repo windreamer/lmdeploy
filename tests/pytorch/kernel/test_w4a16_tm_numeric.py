@@ -14,12 +14,25 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA requ
 GROUP_SIZE = 128
 
 
-def _pack_int4(values: torch.Tensor) -> torch.Tensor:
-    """Pack signed INT4 codes, least-significant nibble first."""
-    values = (values.to(torch.int32) + 8) % 16  # two's-complement nibble
-    unpacked = values.unflatten(-1, (-1, 8))
-    packed = sum(unpacked[..., i] << (4 * i) for i in range(8))
-    return packed.to(torch.int32)
+AWQ_GEMM_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def _pack_awq_gemm(values: torch.Tensor) -> torch.Tensor:
+    """Pack signed INT4 into the AWQ-gemm int32 layout.
+
+    ``values`` hold logical int4 codes; nibble ``j`` of each int32 stores the
+    logical column ``AWQ_GEMM_ORDER.index(j)`` of its 8-wide group, matching
+    the interleave the triton kernel and the TurboMind AWQFormat both decode.
+    """
+    codes = (values.to(torch.int32) + 8) % 16
+    grouped = codes.unflatten(-1, (-1, 8))
+    packed = torch.empty_like(grouped)
+    for nibble in range(8):
+        packed[..., nibble] = grouped[..., AWQ_GEMM_ORDER.index(nibble)]
+    out = torch.zeros(packed.shape[:-1], dtype=torch.int32)
+    for nibble in range(8):
+        out |= packed[..., nibble] << (4 * nibble)
+    return out
 
 
 def _make_awq_weights(in_features: int, out_features: int, group_size: int, seed: int = 0):
@@ -28,8 +41,8 @@ def _make_awq_weights(in_features: int, out_features: int, group_size: int, seed
     scales = (torch.randn((in_features // group_size, out_features), generator=generator) * 0.05 + 1.0).half()
     q4 = torch.randint(-8, 8, (in_features, out_features), generator=generator)
     z4 = torch.randint(-8, 8, (in_features // group_size, out_features), generator=generator)
-    qweight = _pack_int4(q4)
-    qzeros = _pack_int4(z4)
+    qweight = _pack_awq_gemm(q4)
+    qzeros = _pack_awq_gemm(z4)
 
     z = z4.repeat_interleave(group_size, dim=0)
     weight = (q4 - z).float() * scales.float().repeat_interleave(group_size, dim=0)
@@ -44,21 +57,21 @@ def _quality(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, float
     return float(nrmse), float(cosine)
 
 
-def _run_tm(x, qweight, scales, qzeros, group_size=GROUP_SIZE):
+def _run_tm(x, qweight, scales, qzeros, group_size=GROUP_SIZE, bias=None):
     from lmdeploy.pytorch.backends.cuda.turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
 
     impl = TurbomindAwqLinearW4A16Impl(x.size(-1), scales.size(1), 4, group_size)
-    impl.update_weights(qweight, scales, qzeros)
+    impl.update_weights(qweight, scales, qzeros, bias)
     try:
-        return impl.forward(x, qweight, scales, qzeros)
+        return impl.forward(x, qweight, scales, qzeros, bias)
     finally:
         impl._release()
 
 
-def _run_triton(x, qweight, scales, qzeros):
+def _run_triton(x, qweight, scales, qzeros, group_size=GROUP_SIZE):
     from lmdeploy.pytorch.backends.cuda.awq_modules import AwqLinearW4A16Impl
 
-    impl = AwqLinearW4A16Impl(scales.size(0) * GROUP_SIZE, scales.size(1), 4, GROUP_SIZE)
+    impl = AwqLinearW4A16Impl(x.size(-1), scales.size(1), 4, group_size)
     return impl.forward(x, qweight, scales, qzeros)
 
 
@@ -76,7 +89,7 @@ def test_tm_w4a16_matches_triton(out_features, in_features, batch):
     qweight, scales, qzeros, weight = _make_awq_weights(in_features, out_features, GROUP_SIZE)
     x = torch.randn((batch, in_features), dtype=torch.float16, device='cuda')
 
-    reference = (x.float() @ weight.T).half()
+    reference = (x.float() @ weight).half()
     triton_out = _run_triton(x, qweight, scales, qzeros)
     tm_out = _run_tm(x, qweight, scales, qzeros)
 
@@ -97,7 +110,7 @@ def test_tm_w4a16_matches_triton_with_bias(out_features, in_features):
     x = torch.randn((3, in_features), dtype=torch.float16, device='cuda')
 
     triton_out = _run_triton(x, qweight, scales, qzeros) + bias
-    tm_out = _run_tm(x, qweight, scales, qzeros, bias)
+    tm_out = _run_tm(x, qweight, scales, qzeros, bias=bias)
 
     _, cos = _quality(tm_out, triton_out)
     assert cos >= 0.999
@@ -116,7 +129,7 @@ def test_triton_group32_matches_reference_and_tm_gate_refuses():
 
     impl = AwqLinearW4A16Impl(in_features, out_features, 4, group_size)
     out = impl.forward(x, qweight, scales, qzeros)
-    reference = (x.float() @ weight.T).half()
+    reference = (x.float() @ weight).half()
     _, cos = _quality(out, reference)
     assert cos >= 0.99
 
@@ -167,7 +180,9 @@ def test_auto_uses_turbomind_on_supported_capability():
                                 bias=False,
                                 output_dtype=torch.float16)
     impl = awq_modules._build_linear_w4a16(spec)
-    assert type(impl) is awq_modules.TurbomindAwqLinearW4A16Impl
+    from lmdeploy.pytorch.backends.cuda.turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
+
+    assert type(impl) is TurbomindAwqLinearW4A16Impl
 
     qweight, scales, qzeros, _ = _make_awq_weights(in_features, out_features, GROUP_SIZE)
     x = torch.randn((5, in_features), dtype=torch.float16, device='cuda')

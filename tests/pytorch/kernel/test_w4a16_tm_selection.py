@@ -11,6 +11,7 @@ Seams under test:
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 import torch
@@ -121,6 +122,12 @@ class TestFactoryTableRows:
         assert ('w4a16', (9, 0)) in TM_OPS_FACTORY_TABLE
         for key, row in TM_OPS_FACTORY_TABLE.items():
             assert row.get('evidence'), key
+
+    def test_evidence_files_exist(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        for key, row in TM_OPS_FACTORY_TABLE.items():
+            evidence = repo_root / row['evidence']
+            assert evidence.is_file(), f'{key} evidence missing: {evidence}'
 
     def test_no_other_family_has_rows(self):
         other = [k for k in TM_OPS_FACTORY_TABLE if k[0] != 'w4a16']

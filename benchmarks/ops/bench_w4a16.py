@@ -16,10 +16,21 @@ import time
 import torch
 
 
+AWQ_GEMM_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
 def _pack_int4(values: torch.Tensor) -> torch.Tensor:
-    values = (values.to(torch.int32) + 8) % 16
-    unpacked = values.unflatten(-1, (-1, 8))
-    return sum(unpacked[..., i] << (4 * i) for i in range(8)).to(torch.int32)
+    """Pack signed INT4 into the AWQ-gemm int32 layout (see the numeric
+    tests for the interleave contract shared by triton and TurboMind)."""
+    codes = (values.to(torch.int32) + 8) % 16
+    grouped = codes.unflatten(-1, (-1, 8))
+    packed = torch.empty_like(grouped)
+    for nibble in range(8):
+        packed[..., nibble] = grouped[..., AWQ_GEMM_ORDER.index(nibble)]
+    out = torch.zeros(packed.shape[:-1], dtype=torch.int32)
+    for nibble in range(8):
+        out |= packed[..., nibble] << (4 * nibble)
+    return out
 
 
 def _make_weights(in_features, out_features, group_size=128, seed=0):
@@ -34,23 +45,20 @@ def _make_weights(in_features, out_features, group_size=128, seed=0):
 
 
 def _run_triton(x, qweight, scales, qzeros):
-    from lmdeploy.pytorch.kernels.cuda.awq_modules import wq_gemm_forward
+    from lmdeploy.pytorch.backends.cuda.awq_modules import wq_gemm_forward
 
     return wq_gemm_forward(x, qweight, qzeros, scales, 4, 128, None, scales.size(1))
 
 
-def _run_tm(x, qweight, scales, qzeros):
+def _make_tm_impl(qweight, scales, qzeros):
     from lmdeploy.pytorch.backends.cuda.turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
 
-    impl = TurbomindAwqLinearW4A16Impl(x.size(-1), scales.size(1), 4, 128)
+    impl = TurbomindAwqLinearW4A16Impl(scales.shape[0] * 128, scales.size(1), 4, 128)
     impl.update_weights(qweight, scales, qzeros)
-    try:
-        return impl.forward(x, qweight, scales, qzeros)
-    finally:
-        impl._release()
+    return impl
 
 
-def _time(fn, iters=50, warmup=10):
+def _time(fn, iters=200, warmup=20):
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -65,6 +73,7 @@ SHAPES = [
     # (batch, in_features, out_features)
     (1, 4096, 4096),
     (8, 4096, 4096),
+    (64, 4096, 4096),
     (1, 4096, 11008),
     (8, 4096, 11008),
     (1, 512, 1024),
@@ -86,11 +95,12 @@ def main():
         qweight, scales, qzeros = _make_weights(k, n)
         x = torch.randn((batch, k), dtype=torch.float16, device='cuda')
         entry = {'batch': batch, 'in_features': k, 'out_features': n, 'impls': {}}
+
+        impl = _make_tm_impl(qweight, scales, qzeros)
+        entry['impls']['turbomind_ms'] = _time(lambda: impl.forward(x, qweight, scales, qzeros))
+        impl._release()
+
         entry['impls']['triton_ms'] = _time(lambda: _run_triton(x, qweight, scales, qzeros))
-        try:
-            entry['impls']['turbomind_ms'] = _time(lambda: _run_tm(x, qweight, scales, qzeros))
-        except Exception as exc:  # gate-blocked or impl error
-            entry['impls']['turbomind_error'] = str(exc)
         print(entry)
         shapes.append(entry)
 
