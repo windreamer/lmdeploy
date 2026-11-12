@@ -259,9 +259,38 @@ def _supports_gluon(in_features: int, out_features: int, block_size: int, dtype:
             and fp8_dtype == torch.float8_e4m3fn and in_features % block_size == 0 and out_features % 8 == 0)
 
 
+def _turbomind_blockedf8_decision(spec: LinearBlockedF8BuildSpec, provider: str):
+    """Resolve the single-switch decision for the blocked_fp8 family.
+
+    The published per-op variable participates only as an explicit value
+    (its 'triton' choice is the one hard contradiction with force); 'auto'
+    means no per-op opinion so the single-switch decides alone. No factory
+    table row ships for this family and no new per-op choice is added.
+    """
+    from ..tm_ops import resolve_tm
+
+    from .turbomind_blockedf8_modules import turbomind_blockedf8_gate_reason
+
+    capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+    return resolve_tm(
+        'blocked_fp8',
+        capability,
+        lambda: turbomind_blockedf8_gate_reason(spec.in_features, spec.out_features, spec.block_size,
+                                                spec.output_dtype, spec.fp8_dtype),
+        per_op_backend=None if provider == 'auto' else provider,
+    )
+
+
 def _build_linear_blocked_f8(spec: LinearBlockedF8BuildSpec) -> LinearBlockedF8Impl:
     """Build the requested provider or the best compatible provider."""
     provider = blocked_fp8_gemm_backend
+
+    if _turbomind_blockedf8_decision(spec, provider).selected:
+        from .turbomind_blockedf8_modules import TurbomindLinearBlockedF8Impl
+        impl = TurbomindLinearBlockedF8Impl(spec.in_features, spec.out_features, spec.block_size)
+        impl.set_scale_fmt(spec.scale_fmt)
+        logger.debug('Build LinearBlockedF8 with TurbomindLinearBlockedF8Impl.')
+        return impl
 
     if provider == 'auto':
         if _supports_deep_gemm(spec.block_size, spec.output_dtype, spec.fp8_dtype):
