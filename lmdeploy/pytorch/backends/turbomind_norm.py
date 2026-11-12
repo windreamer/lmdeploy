@@ -16,7 +16,7 @@ Variant coverage conclusion (recorded per ticket 04):
 """
 import torch
 
-from ..norm import RMSNormImpl
+from .norm import RMSNormImpl
 
 
 class TurbomindRMSNormImpl(RMSNormImpl):

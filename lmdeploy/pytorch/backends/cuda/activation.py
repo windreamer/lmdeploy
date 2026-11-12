@@ -30,21 +30,20 @@ class TritonSiluAndMulImpl(SiluAndMulImpl):
         return out
 
 
-def turbomind_silu_and_mul_gate_reason(dtype: torch.dtype) -> str | None:
+def turbomind_silu_and_mul_gate_reason() -> str | None:
     """Return a reason string when the TurboMind activation kernel cannot run
     this problem, else None.
 
     The TM kernel vectorizes with 16-byte loads (vec = 4 elements for
-    fp16/bf16) without a per-element tail mask, so the activation width must
-    be a multiple of the vector size; the moe_ep / masked-post-quant variants
-    are covered by ``turbomind_activation.py``'s module docstring.
+    fp16/bf16, the dtypes it dispatches to) without a per-element tail mask,
+    and reads gate/up with one shared row stride. The moe_ep /
+    masked-post-quant variants are covered by ``turbomind_activation.py``'s
+    module docstring.
     """
     from lmdeploy import turbomind
 
     if not turbomind.is_available():
         return f'TurboMind extension unavailable: {turbomind._import_error}'
-    if dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        return f'unsupported dtype {dtype} (TM kernel supports fp16/bf16/fp32)'
     return None
 
 
@@ -59,9 +58,9 @@ def build_silu_and_mul(spec: SiluAndMulBuildSpec) -> SiluAndMulImpl:
     capability = torch.cuda.get_device_capability()
     decision = resolve_tm('silu_and_mul',
                           capability,
-                          gate_reason_fn=lambda: turbomind_silu_and_mul_gate_reason(torch.get_default_dtype()))
+                          gate_reason_fn=turbomind_silu_and_mul_gate_reason)
     if decision.selected:
-        from .turbomind_activation import TurbomindSiluAndMulImpl
+        from ..turbomind_activation import TurbomindSiluAndMulImpl
         impl_cls = TurbomindSiluAndMulImpl
     else:
         impl_cls = TritonSiluAndMulImpl

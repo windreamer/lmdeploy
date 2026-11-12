@@ -18,7 +18,7 @@ Variant coverage conclusion (recorded per ticket 04):
 """
 import torch
 
-from ..activation import SiluAndMulImpl
+from .activation import SiluAndMulImpl
 
 
 class TurbomindSiluAndMulImpl(SiluAndMulImpl):
@@ -37,11 +37,17 @@ class TurbomindSiluAndMulImpl(SiluAndMulImpl):
             x = x.flatten(0, -2)
 
         gate, up = x.chunk(2, -1)
-        if not self.inplace:
-            gate = gate.clone()
-        # With inplace=True the Triton implementation writes the result into
-        # the gate half of x; the TM kernel does exactly that.
-        out = gate
+        if self.inplace:
+            # The kernel writes into the gate half of x and reads both halves
+            # with the gate row stride, which matches here (both are views of
+            # x). This mirrors the Triton inplace contract.
+            out = gate
+        else:
+            # The TM kernel uses a single row stride for gate and up, so the
+            # two halves must have equal strides; clone both into contiguous
+            # buffers to keep the seam's non-mutating contract.
+            out = gate.clone()
+            up = up.clone()
 
         _tm.silu_and_mul(_tm.from_dlpack(out), _tm.from_dlpack(up), None,
                          torch.cuda.current_stream(x.device).cuda_stream)

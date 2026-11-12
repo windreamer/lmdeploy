@@ -9,10 +9,11 @@
 #include <pybind11/stl.h>
 
 #include "src/turbomind/core/tensor.h"
-#include "src/turbomind/kernels/activation_ops.h"
+#include "src/turbomind/kernels/activation.h"
 #include "src/turbomind/kernels/norm/rms_norm.h"
 
 namespace py = pybind11;
+using namespace pybind11::literals;
 
 namespace turbomind::python_norm_act {
 namespace {
