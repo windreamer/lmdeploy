@@ -42,6 +42,10 @@ pytestmark = [
                        reason='capability outside pre_sm90/sm90/sm120 buckets'),
 ]
 
+from lmdeploy.pytorch.model_inputs import StepContextManager, set_step_ctx_manager  # noqa: E402
+
+set_step_ctx_manager(StepContextManager())
+
 NUM_K_HEADS = 2
 NUM_V_HEADS = 4
 HEAD_DIM = 128
@@ -70,8 +74,10 @@ def _make_inputs(lengths, device, seed=0):
          2).to(torch.bfloat16)
     v = ((torch.rand(1, total, NUM_V_HEADS, HEAD_DIM, generator=gen, device=device) - 0.5) *
          2).to(torch.bfloat16)
-    b = torch.rand(1, total, 1, NUM_V_HEADS, generator=gen, device=device).to(torch.bfloat16)
-    a = torch.rand(1, total, 1, NUM_V_HEADS, generator=gen, device=device).to(torch.bfloat16)
+    b = torch.rand(1, total, NUM_K_HEADS, NUM_V_HEADS // NUM_K_HEADS,
+                   generator=gen, device=device).to(torch.bfloat16)
+    a = torch.rand(1, total, NUM_K_HEADS, NUM_V_HEADS // NUM_K_HEADS,
+                   generator=gen, device=device).to(torch.bfloat16)
     dt_bias = torch.rand(NUM_V_HEADS, generator=gen, device=device) * 0.2
     a_log_exp = -torch.rand(NUM_V_HEADS, generator=gen, device=device) * 2
     return q, k, v, b, a, dt_bias, a_log_exp
@@ -104,14 +110,18 @@ def _state_pool(device, seed=42, slots=10):
             0.2).to(torch.bfloat16)
 
 
-@torch.inference_mode()
 class TestTmVsFlaNumerics:
 
     HEADS = NUM_V_HEADS
 
     @pytest.fixture(autouse=True)
     def _cuda(self):
-        torch.set_default_device('cuda')
+        with torch.inference_mode():
+            torch.set_default_device('cuda')
+            try:
+                yield
+            finally:
+                torch.set_default_device('cpu')
 
     @pytest.mark.parametrize('lengths,kv_lengths,state_ids', [
         ((5, 9, 1), (0, 0, 0), [2, 5, 7]),  # all fresh
@@ -176,12 +186,17 @@ class TestTmVsFlaNumerics:
             initial_state=pool_fla[sel].contiguous(),
             output_final_state=True,
             use_qk_l2norm_in_kernel=True,
-            transpose_state_layout=True,
+            state_v_first=True,
         )
         pool_fla[sel] = final.to(pool_fla.dtype)
 
+        if out_fla.dim() == 3:  # FLA squeezes the singleton token dim
+            out_fla = out_fla.unsqueeze(1)
+
         assert out_tm.shape == (1, batch, self.HEADS, HEAD_DIM)
-        torch.testing.assert_close(out_tm[0, valid].float(), out_fla.float(), rtol=2e-2, atol=2e-2)
+        tm_rows = out_tm.reshape(batch, self.HEADS, HEAD_DIM)[valid]
+        fla_rows = out_fla.reshape(-1, self.HEADS, HEAD_DIM)
+        torch.testing.assert_close(tm_rows.float(), fla_rows.float(), rtol=2e-2, atol=2e-2)
         torch.testing.assert_close(pool_tm[sel].float(),
                                    pool_fla[sel].float(),
                                    rtol=2e-2,

@@ -140,10 +140,11 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
     def _gather_state_blocks(self, recurrent_state: torch.Tensor, state_ids: torch.Tensor):
         """Materialize TM-expected (B, hv, K, V) state blocks plus validity.
 
-        Returns (blocks, read_ids, write_ids) where ``read_ids`` selects the
-        rows the TM kernels may read (invalid ids read a zero block) and
-        ``write_ids`` are the rows to scatter back (slot 0 is reserved
-        read-only, mirroring the TileLang recurrent kernel semantics).
+        Returns (blocks, write_rows, write_ids): ``write_rows`` are the
+        positions within ``blocks`` whose sequences may write state back and
+        ``write_ids`` are the corresponding slot ids in the pool (slot 0 is
+        reserved read-only, mirroring the TileLang recurrent kernel
+        semantics).
         """
         num_slots = recurrent_state.shape[0]
         ids = state_ids.to(torch.int64)
@@ -151,14 +152,16 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
         read_ids = ids.clamp(0)
         blocks = recurrent_state.index_select(0, read_ids).transpose(-2, -1).contiguous()
         blocks[~valid] = 0
-        write_ids = ids[valid & (ids > 0)]
-        return blocks, read_ids, write_ids
+        writable = valid & (ids > 0)
+        write_rows = writable.nonzero(as_tuple=True)[0]
+        write_ids = ids[writable]
+        return blocks, write_rows, write_ids
 
     def _scatter_state_blocks(self, recurrent_state: torch.Tensor, blocks: torch.Tensor,
-                              write_ids: torch.Tensor) -> None:
-        if write_ids.numel() == 0:
+                              write_rows: torch.Tensor, write_ids: torch.Tensor) -> None:
+        if write_rows.numel() == 0:
             return
-        recurrent_state.index_copy_(0, write_ids, blocks[write_ids].transpose(-2, -1))
+        recurrent_state.index_copy_(0, write_ids, blocks[write_rows].transpose(-2, -1))
 
     def _plan_and_run(self,
                       q,
@@ -166,14 +169,11 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
                       v,
                       g,
                       beta,
-                      recurrent_state,
                       blocks,
-                      write_ids,
                       finished,
                       *,
                       mode,
-                      q_offsets=None,
-                      keep_refs=None):
+                      q_offsets=None):
         tm = self._bridge()
         g, beta = self._align_gates(g.contiguous(), beta.contiguous())
         tensors_q = tm.from_dlpack(q)
@@ -235,8 +235,8 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
         )
         # Keep native-side views alive until the (stream-ordered) copies back
         # below have been enqueued.
-        out._delta_rule_refs = (workspace, execution_state_ptrs, state_tma_descs, blocks,
-                                finished, q_offsets, keep_refs)
+        out._delta_rule_refs = (workspace, execution_state_ptrs, state_tma_descs, q_offsets,
+                                finished)
         return out
 
     # -- seam API ----------------------------------------------------------
@@ -274,7 +274,7 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             q = torch.nn.functional.normalize(q, p=2, dim=-1)
             k = torch.nn.functional.normalize(k, p=2, dim=-1)
         q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-        blocks, _, write_ids = self._gather_state_blocks(initial_state, state_indices)
+        blocks, write_rows, write_ids = self._gather_state_blocks(initial_state, state_indices)
         sequence_num = state_indices.shape[0]
         finished = torch.zeros(sequence_num, device=q.device, dtype=torch.bool)
         out = self._plan_and_run(
@@ -283,15 +283,13 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             v,
             g,
             beta,
-            initial_state,
             blocks,
-            write_ids,
             finished,
             mode='chunked',
             q_offsets=cu_seqlens.to(device=q.device, dtype=torch.int32).contiguous(),
         )
         # TM wrote final states into `blocks` (stream-ordered); scatter back.
-        self._scatter_state_blocks(initial_state, blocks, write_ids)
+        self._scatter_state_blocks(initial_state, blocks, write_rows, write_ids)
         return out, initial_state
 
     def fused_recurrent_gated_delta_rule(self,
@@ -322,7 +320,7 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             q = torch.nn.functional.normalize(q, p=2, dim=-1)
             k = torch.nn.functional.normalize(k, p=2, dim=-1)
         q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-        blocks, _, write_ids = self._gather_state_blocks(initial_state, state_indices)
+        blocks, write_rows, write_ids = self._gather_state_blocks(initial_state, state_indices)
         # finished: no write-back for invalid ids and reserved slot 0.
         num_slots = initial_state.shape[0]
         ids = state_indices.to(torch.int64)
@@ -333,13 +331,11 @@ class TmGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             v,
             g,
             beta,
-            initial_state,
             blocks,
-            write_ids,
             finished,
             mode='recurrent',
         )
-        self._scatter_state_blocks(initial_state, blocks, write_ids)
+        self._scatter_state_blocks(initial_state, blocks, write_rows, write_ids)
         batch = q.shape[0]
         return out.reshape(batch, 1, v.shape[2], v.shape[3]), None
 

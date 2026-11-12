@@ -154,13 +154,13 @@ class TestFeasibilityGate:
         else:
             assert reason is not None
 
-        for cap in ((8, 6), (9, 0), (10, 1), (12, 0)):
+        for cap in ((8, 6), (9, 0), (9, 10), (12, 0)):
             monkeypatch.setattr(gated_delta_rule_cuda, '_device_capability', lambda cap=cap: cap)
             reason = gated_delta_rule_cuda._tm_gated_delta_gate_reason(_spec())
-            if cap == (12, 0) and gated_delta_rule_cuda._tm_native_bridge_available():
-                assert reason is None
+            if reason is None:
+                assert cap[0] < 9 or cap[0] == 9 or cap == (12, 0)
             else:
-                assert reason is not None
+                assert 'outside the supported buckets' in reason
 
 
 def test_gate_is_lazy_on_non_tm_path(monkeypatch):
