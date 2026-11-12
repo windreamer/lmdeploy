@@ -1,0 +1,50 @@
+[
+  {
+    "family": "w4a16",
+    "impl": "turbomind",
+    "device": "no SM90 hardware in this fleet; capability documented from the f745840 prototype validation (PR #4897)",
+    "capability": [
+      9,
+      0
+    ],
+    "shapes": [
+      {
+        "M": 1,
+        "K": 4096,
+        "N": 4096
+      },
+      {
+        "M": 8,
+        "K": 4096,
+        "N": 11008
+      }
+    ],
+    "timings_us": {
+      "M1_K4096_N4096": "unavailable: no SM90 hardware in this fleet; SM90 auto -> TurboMind is the pre-existing f745840 default preserved byte-for-byte by ticket 02",
+      "M8_K4096_N11008": "unavailable: no SM90 hardware in this fleet"
+    },
+    "git_sha": "20b8a82757328a7880e439270affd30ea7d120d6",
+    "timestamp": "2026-11-12T23:30:00+0800"
+  },
+  {
+    "family": "w4a16",
+    "impl": "triton",
+    "device": "no SM90 hardware in this fleet",
+    "capability": [
+      9,
+      0
+    ],
+    "shapes": [
+      {
+        "M": 1,
+        "K": 4096,
+        "N": 4096
+      }
+    ],
+    "timings_us": {
+      "M1_K4096_N4096": "unavailable: no SM90 hardware in this fleet"
+    },
+    "git_sha": "20b8a82757328a7880e439270affd30ea7d120d6",
+    "timestamp": "2026-11-12T23:30:00+0800"
+  }
+]
