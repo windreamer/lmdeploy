@@ -1,6 +1,60 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import contextlib
 import os
+from dataclasses import dataclass, field
+
+TURBOMIND_OPS_FAMILIES = (
+    'w4a16',
+    'gated_delta',
+    'rms_norm',
+    'silu_and_mul',
+    'blocked_fp8',
+    'copy_cache',
+)
+
+
+@dataclass(frozen=True)
+class TurbomindOpsConfig:
+    """Parsed LMDEPLOY_TURBOMIND_OPS single switch.
+
+    mode is one of 'auto', 'off', 'force'; forced is the frozenset of
+    families force applies to (all families when the bare 'force' value is
+    used, otherwise the requested csv subset).
+    """
+    mode: str
+    forced: frozenset = field(default_factory=frozenset)
+
+
+def parse_turbomind_ops(value: str | None) -> TurbomindOpsConfig:
+    """Parse LMDEPLOY_TURBOMIND_OPS into a TurbomindOpsConfig.
+
+    Raises ValueError on unknown values or unknown family names so that
+    configuration errors surface at import time.
+    """
+    if value is None or value == '':
+        return TurbomindOpsConfig(mode='auto', forced=frozenset())
+    value = value.strip().lower()
+    if value == 'auto':
+        return TurbomindOpsConfig(mode='auto', forced=frozenset())
+    if value == 'off':
+        return TurbomindOpsConfig(mode='off', forced=frozenset())
+    if value == 'force':
+        return TurbomindOpsConfig(mode='force', forced=frozenset(TURBOMIND_OPS_FAMILIES))
+    if value.startswith('force='):
+        names = [name.strip() for name in value[len('force='):].split(',') if name.strip()]
+        unknown = [name for name in names if name not in TURBOMIND_OPS_FAMILIES]
+        if unknown:
+            raise ValueError(
+                f'Unknown TM op family in LMDEPLOY_TURBOMIND_OPS: {unknown}. '
+                f'Valid families: {TURBOMIND_OPS_FAMILIES}')
+        if not names:
+            raise ValueError(
+                'LMDEPLOY_TURBOMIND_OPS force=<csv> requires at least one family. '
+                f'Valid families: {TURBOMIND_OPS_FAMILIES}')
+        return TurbomindOpsConfig(mode='force', forced=frozenset(names))
+    raise ValueError(
+        f'Invalid LMDEPLOY_TURBOMIND_OPS value: {value!r}. '
+        "Valid values: 'auto', 'off', 'force', 'force=<family csv>'")
 
 
 def env_to_bool(
@@ -240,6 +294,9 @@ with set_envs():
     # sparse MLA attention
     sparse_mla_backend = env_to_choice('LMDEPLOY_SPARSE_MLA_BACKEND', 'flashmla',
                                        {'flashmla', 'tilelang'})
+
+    # TurboMind ops single switch
+    turbomind_ops = parse_turbomind_ops(os.getenv('LMDEPLOY_TURBOMIND_OPS', 'auto'))
 
     # Disable dense prefill for sparse MLA; set before startup.
     mla_disable_dense_prefill = env_to_bool('LMDEPLOY_MLA_DISABLE_DENSE_PREFILL', False)
