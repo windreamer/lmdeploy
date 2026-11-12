@@ -87,40 +87,39 @@ def main():
     args = parser.parse_args()
 
     device = torch.cuda.get_device_capability()
+    device_name = torch.cuda.get_device_name(0)
     git_sha = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
-    props = torch.cuda.get_device_properties(0)
+    timestamp = time.strftime('%Y-%m-%dT%H:%M:%S%z')
 
+    timings = {'triton': {}, 'turbomind': {}}
     shapes = []
     for batch, k, n in SHAPES:
         qweight, scales, qzeros = _make_weights(k, n)
         x = torch.randn((batch, k), dtype=torch.float16, device='cuda')
-        entry = {'batch': batch, 'in_features': k, 'out_features': n, 'impls': {}}
+        shapes.append({'M': batch, 'K': k, 'N': n})
 
         impl = _make_tm_impl(qweight, scales, qzeros)
-        entry['impls']['turbomind_ms'] = _time(lambda: impl.forward(x, qweight, scales, qzeros))
+        key = f'M{batch}_K{k}_N{n}'
+        timings['turbomind'][key] = _time(lambda: impl.forward(x, qweight, scales, qzeros)) * 1000
         impl._release()
+        timings['triton'][key] = _time(lambda: _run_triton(x, qweight, scales, qzeros)) * 1000
+        print(key, timings['turbomind'][key], timings['triton'][key])
 
-        entry['impls']['triton_ms'] = _time(lambda: _run_triton(x, qweight, scales, qzeros))
-        print(entry)
-        shapes.append(entry)
-
-    record = {
-        'family': 'w4a16',
-        'device': {
-            'name': props.name,
+    records = [
+        {
+            'family': 'w4a16',
+            'impl': impl_name,
+            'device': device_name,
             'capability': list(device),
-            'multi_processor_count': props.multi_processor_count,
-            'total_memory_gb': round(props.total_memory / 2**30, 1),
-        },
-        'git_sha': git_sha,
-        'dtype': 'float16',
-        'group_size': 128,
-        'shapes': shapes,
-    }
-    if args.capability_note:
-        record['notes'] = args.capability_note
+            'shapes': shapes,
+            'timings_us': timings[impl_name],
+            'git_sha': git_sha,
+            'timestamp': timestamp,
+        }
+        for impl_name in ('triton', 'turbomind')
+    ]
     with open(args.output, 'w') as handle:
-        json.dump(record, handle, indent=2)
+        json.dump(records, handle, indent=2)
         handle.write('\n')
     print(f'wrote {args.output}')
 
