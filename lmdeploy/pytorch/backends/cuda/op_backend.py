@@ -61,8 +61,8 @@ class CudaOpsBackend(DefaultOpsBackend):
         from ..rejection_sampling import RejectionSamplingBuildSpec
         from ..static_fp8_modules import LinearStaticF8BuildSpec
         if isinstance(spec, SiluAndMulBuildSpec):
-            from .activation import TritonSiluAndMulImpl
-            return cast(ImplT, TritonSiluAndMulImpl(spec.inplace))
+            from .activation import build_silu_and_mul
+            return cast(ImplT, build_silu_and_mul(spec))
         if isinstance(spec, KdaBuildSpec):
             from .kda import CudaKdaImpl
             return cast(ImplT, CudaKdaImpl(indexed_state=spec.indexed_state))
@@ -70,8 +70,8 @@ class CudaOpsBackend(DefaultOpsBackend):
             from .apply_rotary_emb import TritonApplyRotaryEmbImpl
             return cast(ImplT, TritonApplyRotaryEmbImpl(enable_fp32_compute=spec.enable_fp32_compute))
         if isinstance(spec, RMSNormBuildSpec):
-            from .norm import TritonRMSNormImpl
-            return cast(ImplT, TritonRMSNormImpl(spec.hidden_size, spec.eps))
+            from .norm import build_rms_norm
+            return cast(ImplT, build_rms_norm(spec))
         if isinstance(spec, RMSNormW8A8BuildSpec):
             from .qmodules import TritonRMSNormW8A8Impl
             return cast(ImplT, TritonRMSNormW8A8Impl(spec.hidden_size, spec.eps, spec.quant_dtype))
