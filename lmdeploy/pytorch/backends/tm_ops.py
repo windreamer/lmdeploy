@@ -37,9 +37,17 @@ TM_OPS_FAMILIES = TURBOMIND_OPS_FAMILIES
 # Built-in factory table: key = (family, exact (major, minor) capability),
 # value = dict with an 'evidence' field referencing benchmark records under
 # benchmarks/ops/. Rows are only added by review PRs carrying benchmark
-# evidence. Intentionally empty at infrastructure commit; family tickets
-# land their own rows.
-TM_OPS_FACTORY_TABLE: dict = {}
+# evidence. w4a16 rows landed by ticket 02: sm80 benchmark record plus the
+# sm90 record documenting the f745840-era default behavior inherited by the
+# promoted stack.
+TM_OPS_FACTORY_TABLE: dict = {
+    ('w4a16', (8, 0)): {
+        'evidence': 'benchmarks/ops/w4a16_sm80.json',
+    },
+    ('w4a16', (9, 0)): {
+        'evidence': 'benchmarks/ops/w4a16_sm90.json',
+    },
+}
 
 
 def current_turbomind_ops_config() -> TurbomindOpsConfig:

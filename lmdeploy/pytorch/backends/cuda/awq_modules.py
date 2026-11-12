@@ -16,6 +16,45 @@ def _is_turbomind_gemm_capability_supported(capability: tuple[int, int]):
     return capability == (9, 0)
 
 
+def _is_w4a16_capability_supported(capability: tuple[int, int]):
+    """The promoted W4A16 stack supports every SM80 and SM90 device."""
+    return capability[0] in (8, 9)
+
+
+def _w4a16_tm_feasibility_reason(in_features: int,
+                                 out_features: int,
+                                 w_bit: int,
+                                 group_size: int,
+                                 dtype: torch.dtype = None) -> str | None:
+    """Return why the TurboMind provider cannot serve this W4A16 layer.
+
+    Feasibility gate of the promoted implementation: capability majors
+    {8, 9}. The legacy SM90-only reason stays in
+    :func:`_turbomind_support_reason` for the ``off`` path.
+    """
+    if w_bit != 4:
+        return f'w_bit must be 4, but got {w_bit}'
+    if group_size != 128:
+        return f'group_size must be 128, but got {group_size}'
+    if in_features % 128 != 0:
+        return f'K must be divisible by 128, but got {in_features}'
+    if out_features % 32 != 0:
+        return f'N must be divisible by 32, but got {out_features}'
+    if dtype not in (None, torch.float16):
+        return f'dtype must be float16, but got {dtype}'
+    if not torch.cuda.is_available():
+        return 'CUDA is unavailable'
+
+    capability = torch.cuda.get_device_capability()
+    if not _is_w4a16_capability_supported(capability):
+        return f'CUDA capability {capability} is unsupported'
+
+    from lmdeploy import turbomind
+    if not turbomind.is_available():
+        return 'TurboMind native modules are not built'
+    return None
+
+
 def _turbomind_support_reason(in_features: int,
                               out_features: int,
                               w_bit: int,
@@ -106,22 +145,41 @@ def _build_linear_w4a16(spec: LinearW4A16BuildSpec) -> LinearW4A16Impl:
     """Build the selected CUDA W4A16 linear implementation."""
     provider = _envs.w4a16_gemm_backend
 
-    if provider in ('auto', 'turbomind'):
-        reason = _turbomind_support_reason(spec.in_features, spec.out_features,
-                                           spec.w_bit, spec.group_size, spec.output_dtype)
-        if reason is None:
-            from .turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
-            impl_cls = TurbomindAwqLinearW4A16Impl
-        elif provider == 'turbomind':
+    if provider in ('auto', 'triton', 'turbomind'):
+        from ..tm_ops import resolve_tm
+
+        decision = resolve_tm(
+            'w4a16',
+            capability=torch.cuda.get_device_capability() if torch.cuda.is_available() else None,
+            gate_reason_fn=lambda: _w4a16_tm_feasibility_reason(spec.in_features, spec.out_features,
+                                                                spec.w_bit, spec.group_size, spec.output_dtype),
+            per_op_backend=provider,
+        )
+
+    if provider == 'turbomind':
+        reason = _w4a16_tm_feasibility_reason(spec.in_features, spec.out_features, spec.w_bit,
+                                              spec.group_size, spec.output_dtype)
+        if reason is not None:
             from lmdeploy import turbomind
 
             raise RuntimeError(
                 f'TurboMind W4A16 linear was requested but is unavailable or incompatible: {reason}.'
             ) from turbomind._import_error
+        from .turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
+        impl_cls = TurbomindAwqLinearW4A16Impl
+    elif decision.selected:
+        from .turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
+        impl_cls = TurbomindAwqLinearW4A16Impl
+    elif provider == 'triton':
+        impl_cls = AwqLinearW4A16Impl
+    else:
+        reason = _turbomind_support_reason(spec.in_features, spec.out_features,
+                                           spec.w_bit, spec.group_size, spec.output_dtype)
+        if reason is None:
+            from .turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
+            impl_cls = TurbomindAwqLinearW4A16Impl
         else:
             impl_cls = AwqLinearW4A16Impl
-    else:
-        impl_cls = AwqLinearW4A16Impl
 
     logger.debug('Build LinearW4A16 with %s.', impl_cls.__name__)
     return impl_cls(spec.in_features, spec.out_features, spec.w_bit, spec.group_size)
