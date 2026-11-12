@@ -1,16 +1,50 @@
-{
-  "family": "w4a16",
-  "evidence_kind": "inherited-default",
-  "device": {
-    "name": "NVIDIA A100 80GB PCIe (no SM90 hardware in this fleet; capability documented from the f745840 prototype validation)",
+[
+  {
+    "family": "w4a16",
+    "impl": "turbomind",
+    "device": "no SM90 hardware in this fleet; capability documented from the f745840 prototype validation (PR #4897)",
     "capability": [
       9,
       0
-    ]
+    ],
+    "shapes": [
+      {
+        "M": 1,
+        "K": 4096,
+        "N": 4096
+      },
+      {
+        "M": 8,
+        "K": 4096,
+        "N": 11008
+      }
+    ],
+    "timings_us": {
+      "M1_K4096_N4096": "unavailable: no SM90 hardware in this fleet; SM90 auto -> TurboMind is the pre-existing f745840 default preserved byte-for-byte by ticket 02",
+      "M8_K4096_N11008": "unavailable: no SM90 hardware in this fleet"
+    },
+    "git_sha": "20b8a82757328a7880e439270affd30ea7d120d6",
+    "timestamp": "2026-11-12T23:30:00+0800"
   },
-  "git_sha": "20b8a827",
-  "dtype": "float16",
-  "group_size": 128,
-  "shapes": [],
-  "notes": "SM90 auto -> TurboMind W4A16 is the pre-existing default shipped by f745840 (prototype TurboMind W4A16 backend, PR #4897) and is preserved byte-for-byte by ticket 02; no local SM90 device exists to measure, so this row carries no fresh timings and inherits the shipped behavior."
-}
+  {
+    "family": "w4a16",
+    "impl": "triton",
+    "device": "no SM90 hardware in this fleet",
+    "capability": [
+      9,
+      0
+    ],
+    "shapes": [
+      {
+        "M": 1,
+        "K": 4096,
+        "N": 4096
+      }
+    ],
+    "timings_us": {
+      "M1_K4096_N4096": "unavailable: no SM90 hardware in this fleet"
+    },
+    "git_sha": "20b8a82757328a7880e439270affd30ea7d120d6",
+    "timestamp": "2026-11-12T23:30:00+0800"
+  }
+]
