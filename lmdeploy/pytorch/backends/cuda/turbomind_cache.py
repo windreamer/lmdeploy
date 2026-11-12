@@ -65,8 +65,8 @@ class TurbomindBlockCacheCopy(BlockCacheCopy):
 
         stream = torch.cuda.current_stream(self.device).cuda_stream
         for pool in self.pools:
-            tensor = pool.tensor
-            entry_axis = pool.entry_axis
+            blocks = pool.tensor.unflatten(pool.entry_axis,
+                                           (self.num_logical_blocks, self.pages_per_block))
             for src, dst in zip(src_block_offsets.tolist(), dst_block_offsets.tolist()):
-                _tm.generic_copy_on_stream(_tm.from_dlpack(tensor.select(entry_axis, src)),
-                                           _tm.from_dlpack(tensor.select(entry_axis, dst)), stream)
+                _tm.generic_copy_on_stream(_tm.from_dlpack(blocks.select(pool.entry_axis, src)),
+                                           _tm.from_dlpack(blocks.select(pool.entry_axis, dst)), stream)
