@@ -60,6 +60,10 @@ namespace turbomind::python_linear {
 void bind_linear(pybind11::module_& m);
 }
 
+namespace turbomind::python_norm_act {
+void bind_norm_act(pybind11::module_& m);
+}
+
 namespace turbomind::python {
 void bind_xgrammar(pybind11::module_& m);
 }
@@ -969,5 +973,6 @@ PYBIND11_MODULE(_turbomind, m)
 
     turbomind::linear_attn::delta_rule::bind_delta_rule(m);
     turbomind::python_linear::bind_linear(m);
+    turbomind::python_norm_act::bind_norm_act(m);
     turbomind::bind_moe_gate_v2(m);
 }

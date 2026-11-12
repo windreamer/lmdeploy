@@ -1,0 +1,426 @@
+{
+  "ticket": "04-rmsnorm-siluandmul",
+  "families": [
+    "rms_norm",
+    "silu_and_mul"
+  ],
+  "device": "NVIDIA A100-SXM4-80GB",
+  "capability": [
+    8,
+    0
+  ],
+  "torch": "2.12.1+cu130",
+  "git_sha": "473b951f00fa1040eac46a8d1967447f8164b7a4",
+  "timestamp": "2026-11-12T23:31:33.350935",
+  "host": "SH-IDCA1404-10-140-54-124",
+  "shapes": [
+    [
+      8,
+      512
+    ],
+    [
+      128,
+      4096
+    ],
+    [
+      128,
+      8192
+    ],
+    [
+      2048,
+      8192
+    ],
+    [
+      2048,
+      16384
+    ],
+    [
+      4096,
+      4096
+    ],
+    [
+      4096,
+      8192
+    ]
+  ],
+  "impl": [
+    "triton",
+    "turbomind"
+  ],
+  "timings": {
+    "rms_norm/bfloat16/8x512/triton": [
+      58.00960063934326
+    ],
+    "rms_norm/bfloat16/8x512/triton_residual": [
+      60.77951908111572
+    ],
+    "rms_norm/bfloat16/8x512/turbomind": [
+      47.39583969116211
+    ],
+    "rms_norm/bfloat16/8x512/turbomind_residual": [
+      70.77375888824463
+    ],
+    "rms_norm/bfloat16/128x4096/triton": [
+      90.81855773925781
+    ],
+    "rms_norm/bfloat16/128x4096/triton_residual": [
+      98.13504219055176
+    ],
+    "rms_norm/bfloat16/128x4096/turbomind": [
+      81.18783950805664
+    ],
+    "rms_norm/bfloat16/128x4096/turbomind_residual": [
+      85.37088394165039
+    ],
+    "rms_norm/bfloat16/4096x4096/triton": [
+      89.9839973449707
+    ],
+    "rms_norm/bfloat16/4096x4096/triton_residual": [
+      96.49663925170898
+    ],
+    "rms_norm/bfloat16/4096x4096/turbomind": [
+      88.27391624450684
+    ],
+    "rms_norm/bfloat16/4096x4096/turbomind_residual": [
+      171.65311813354492
+    ],
+    "rms_norm/bfloat16/2048x8192/triton": [
+      57.482237815856934
+    ],
+    "rms_norm/bfloat16/2048x8192/triton_residual": [
+      83.80415916442871
+    ],
+    "rms_norm/bfloat16/2048x8192/turbomind": [
+      88.58624458312988
+    ],
+    "rms_norm/bfloat16/2048x8192/turbomind_residual": [
+      172.78976440429688
+    ],
+    "rms_norm/float16/8x512/triton": [
+      57.333760261535645
+    ],
+    "rms_norm/float16/8x512/triton_residual": [
+      60.90240001678467
+    ],
+    "rms_norm/float16/8x512/turbomind": [
+      45.501441955566406
+    ],
+    "rms_norm/float16/8x512/turbomind_residual": [
+      56.07423782348633
+    ],
+    "rms_norm/float16/128x4096/triton": [
+      57.10847854614258
+    ],
+    "rms_norm/float16/128x4096/triton_residual": [
+      61.132798194885254
+    ],
+    "rms_norm/float16/128x4096/turbomind": [
+      45.51680088043213
+    ],
+    "rms_norm/float16/128x4096/turbomind_residual": [
+      55.654401779174805
+    ],
+    "rms_norm/float16/4096x4096/triton": [
+      57.05728054046631
+    ],
+    "rms_norm/float16/4096x4096/triton_residual": [
+      83.49696159362793
+    ],
+    "rms_norm/float16/4096x4096/turbomind": [
+      87.55711555480957
+    ],
+    "rms_norm/float16/4096x4096/turbomind_residual": [
+      171.54048919677734
+    ],
+    "rms_norm/float16/2048x8192/triton": [
+      57.1289587020874
+    ],
+    "rms_norm/float16/2048x8192/triton_residual": [
+      83.83999824523926
+    ],
+    "rms_norm/float16/2048x8192/turbomind": [
+      88.87295722961426
+    ],
+    "rms_norm/float16/2048x8192/turbomind_residual": [
+      172.35967636108398
+    ],
+    "silu_and_mul/bfloat16/8x512/triton": [
+      30.346240997314453
+    ],
+    "silu_and_mul/bfloat16/8x512/turbomind": [
+      44.72832202911377
+    ],
+    "silu_and_mul/bfloat16/128x8192/triton": [
+      31.16544008255005
+    ],
+    "silu_and_mul/bfloat16/128x8192/turbomind": [
+      44.0064001083374
+    ],
+    "silu_and_mul/bfloat16/4096x8192/triton": [
+      62.79168128967285
+    ],
+    "silu_and_mul/bfloat16/4096x8192/turbomind": [
+      203.60191345214844
+    ],
+    "silu_and_mul/bfloat16/2048x16384/triton": [
+      62.653441429138184
+    ],
+    "silu_and_mul/bfloat16/2048x16384/turbomind": [
+      202.27584838867188
+    ],
+    "silu_and_mul/float16/8x512/triton": [
+      31.006720066070557
+    ],
+    "silu_and_mul/float16/8x512/turbomind": [
+      43.530240058898926
+    ],
+    "silu_and_mul/float16/128x8192/triton": [
+      30.965759754180908
+    ],
+    "silu_and_mul/float16/128x8192/turbomind": [
+      43.88351917266846
+    ],
+    "silu_and_mul/float16/4096x8192/triton": [
+      62.84287929534912
+    ],
+    "silu_and_mul/float16/4096x8192/turbomind": [
+      203.70943069458008
+    ],
+    "silu_and_mul/float16/2048x16384/triton": [
+      62.320637702941895
+    ],
+    "silu_and_mul/float16/2048x16384/turbomind": [
+      202.26560592651367
+    ]
+  },
+  "cases": {
+    "rms_norm": [
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            8,
+            512
+          ]
+        ],
+        "timings_us": {
+          "triton": 58.00960063934326,
+          "triton_residual": 60.77951908111572,
+          "turbomind": 47.39583969116211,
+          "turbomind_residual": 70.77375888824463
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            128,
+            4096
+          ]
+        ],
+        "timings_us": {
+          "triton": 90.81855773925781,
+          "triton_residual": 98.13504219055176,
+          "turbomind": 81.18783950805664,
+          "turbomind_residual": 85.37088394165039
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            4096,
+            4096
+          ]
+        ],
+        "timings_us": {
+          "triton": 89.9839973449707,
+          "triton_residual": 96.49663925170898,
+          "turbomind": 88.27391624450684,
+          "turbomind_residual": 171.65311813354492
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            2048,
+            8192
+          ]
+        ],
+        "timings_us": {
+          "triton": 57.482237815856934,
+          "triton_residual": 83.80415916442871,
+          "turbomind": 88.58624458312988,
+          "turbomind_residual": 172.78976440429688
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            8,
+            512
+          ]
+        ],
+        "timings_us": {
+          "triton": 57.333760261535645,
+          "triton_residual": 60.90240001678467,
+          "turbomind": 45.501441955566406,
+          "turbomind_residual": 56.07423782348633
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            128,
+            4096
+          ]
+        ],
+        "timings_us": {
+          "triton": 57.10847854614258,
+          "triton_residual": 61.132798194885254,
+          "turbomind": 45.51680088043213,
+          "turbomind_residual": 55.654401779174805
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            4096,
+            4096
+          ]
+        ],
+        "timings_us": {
+          "triton": 57.05728054046631,
+          "triton_residual": 83.49696159362793,
+          "turbomind": 87.55711555480957,
+          "turbomind_residual": 171.54048919677734
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            2048,
+            8192
+          ]
+        ],
+        "timings_us": {
+          "triton": 57.1289587020874,
+          "triton_residual": 83.83999824523926,
+          "turbomind": 88.87295722961426,
+          "turbomind_residual": 172.35967636108398
+        }
+      }
+    ],
+    "silu_and_mul": [
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            8,
+            512
+          ]
+        ],
+        "timings_us": {
+          "triton": 30.346240997314453,
+          "turbomind": 44.72832202911377
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            128,
+            8192
+          ]
+        ],
+        "timings_us": {
+          "triton": 31.16544008255005,
+          "turbomind": 44.0064001083374
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            4096,
+            8192
+          ]
+        ],
+        "timings_us": {
+          "triton": 62.79168128967285,
+          "turbomind": 203.60191345214844
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "shapes": [
+          [
+            2048,
+            16384
+          ]
+        ],
+        "timings_us": {
+          "triton": 62.653441429138184,
+          "turbomind": 202.27584838867188
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            8,
+            512
+          ]
+        ],
+        "timings_us": {
+          "triton": 31.006720066070557,
+          "turbomind": 43.530240058898926
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            128,
+            8192
+          ]
+        ],
+        "timings_us": {
+          "triton": 30.965759754180908,
+          "turbomind": 43.88351917266846
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            4096,
+            8192
+          ]
+        ],
+        "timings_us": {
+          "triton": 62.84287929534912,
+          "turbomind": 203.70943069458008
+        }
+      },
+      {
+        "dtype": "float16",
+        "shapes": [
+          [
+            2048,
+            16384
+          ]
+        ],
+        "timings_us": {
+          "triton": 62.320637702941895,
+          "turbomind": 202.26560592651367
+        }
+      }
+    ]
+  }
+}
