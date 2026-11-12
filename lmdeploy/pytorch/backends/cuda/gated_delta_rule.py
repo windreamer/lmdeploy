@@ -610,3 +610,64 @@ class CudaGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             cache_seqlens=cache_seqlens,
             transpose_state_layout=transpose_state_layout,
         )
+
+
+def _device_capability():
+    """(major, minor) of the current CUDA device."""
+    return tuple(torch.cuda.get_device_capability())
+
+
+def _tm_native_bridge_available():
+    """Whether the TurboMind native delta-rule bridge can be loaded."""
+    from .turbomind_gated_delta_rule import _tm_native_bridge_available as check
+    return check()
+
+
+def _tm_gated_delta_gate_reason(spec) -> str | None:
+    """Feasibility gate for the TM gated-delta-rule path.
+
+    Returns None when the native delta-rule stack is usable on this device
+    for this build spec, or a human-readable reason otherwise. Only invoked
+    when a selection decision depends on it (``force``, or ``auto`` plus a
+    factory-table row). Capability buckets follow the native planner
+    registry: pre_sm90 (major < 9), sm90 (major == 9), sm120 (12, 0).
+    """
+    if spec.indexed_state:
+        return ('TurboMind gated delta rule does not support indexed state caches '
+                '(compact SSM state pipeline)')
+    if not _tm_native_bridge_available():
+        return 'TurboMind native delta-rule bridge is unavailable (extension not built or too old)'
+    capability = _device_capability()
+    major, minor = capability
+    if major < 9:
+        bucket = 'pre_sm90'
+    elif major == 9:
+        bucket = 'sm90'
+    elif (major, minor) == (12, 0):
+        bucket = 'sm120'
+    else:
+        return (f'capability {capability} is outside the supported buckets '
+                '(pre_sm90: major<9, sm90: 9.x, sm120: 12.0)')
+    return None
+
+
+def _build_gated_delta_rule(spec):
+    """Build the selected CUDA gated-delta-rule implementation.
+
+    Default (auto/off, factory table without a ``gated_delta`` row) keeps the
+    existing FLA/TileLang selection untouched; the TurboMind stack is only
+    reachable through ``LMDEPLOY_TURBOMIND_OPS=force`` / ``force=gated_delta``
+    (or a future factory-table row added with benchmark evidence).
+    """
+    from ..tm_ops import resolve_tm
+
+    decision = resolve_tm(
+        'gated_delta',
+        capability=_device_capability(),
+        gate_reason_fn=lambda: _tm_gated_delta_gate_reason(spec),
+    )
+    if decision.selected:
+        from .turbomind_gated_delta_rule import TmGatedDeltaRuleImpl
+        logger.info('Building gated delta rule with TurboMind native stack (%s).', decision.source)
+        return TmGatedDeltaRuleImpl(indexed_state=spec.indexed_state)
+    return CudaGatedDeltaRuleImpl(indexed_state=spec.indexed_state)
