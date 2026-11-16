@@ -96,7 +96,7 @@ def _update_torch_dtype(config: 'ModelConfig', dtype: str, device_type: str = 'a
     """
     quantization_config = getattr(config.hf_config, 'quantization_config', dict())
     quant_method = quantization_config.get('quant_method', None)
-    if quant_method in ('awq', 'compressed-tensors'):
+    if quant_method in ('awq', 'compressed-tensors', 'gptq'):
         # The W4A16 linear modules are fp16. A bf16 model dtype would make
         # the residual stream dtype-mismatch the quantized linears.
         logger.debug(f'set torch_dtype to float16 for {quant_method}.')
@@ -1023,6 +1023,16 @@ class QuantizationConfig:
                 raise TypeError(f'Unsupported fp8 fmt: {fmt}')
         elif quant_method == 'compressed-tensors':
             bits, group_size, ignored_layers = _parse_compressed_tensors_config(quant_config)
+        elif quant_method == 'gptq':
+            # GPTQ dense linears load through the AWQ family (see
+            # get_quant_method and normalize_gptq_weights). The checkpoint
+            # conversion absorbs the pack axis, nibble order, and zero point
+            # offset differences, so the AWQ bits/group_size plumbing
+            # applies verbatim.
+            bits = quant_config.get('bits', 4)
+            group_size = quant_config.get('group_size', 128)
+            if quant_dtype is None:
+                quant_dtype = 'bfloat16'
         else:
             raise TypeError(f'Unsupported quant method: {quant_method}')
 
@@ -1055,6 +1065,13 @@ class QuantizationConfig:
         """Get quant method for module."""
         if module_kind not in {'linear', 'moe', 'norm'}:
             raise ValueError(f'Unsupported quant module kind: {module_kind}')
+        if self.quant_method == 'gptq':
+            if module_kind == 'norm':
+                return None
+            # GPTQ dense linears load through the AWQ family: the weight
+            # loader normalizes each GPTQ module to the canonical AWQ
+            # layout at load time (see model_weight_loader and gptq_repack).
+            return 'awq'
         if self.quant_method == 'compressed-tensors':
             if module_kind == 'norm':
                 return None
