@@ -1,0 +1,57 @@
+<!--
+Copyright (c) OpenMMLab. All rights reserved.
+-->
+
+# ROADMAP:TurboMind kernel 组合迁移路线图
+
+来源:KernelPortfolio / ConfigCliSurface 盘点 + 用户拍板(2026-11-16)。此文件是组合级路线图;每批启动时另立 spec(复用 GEMM 批流程)。决策正文同步 HISTORY。
+
+## 三条原则
+
+1. **单机为界**:TM 嫁接范围 = 单机 kernel 性能;多机通信能力(DeepEP a2a 等)不迁移,通信面归 PyTorch 侧。
+2. **KV Cache 默认 PyTorch 标准**:标准布局为默认;TM 布局(含 per-token scale 槽的 packed-KV)为 benchmark 驱动的 opt-in——经 `CacheBackend` 布局抽象实现,仅当 kernel 级 benchmark 证明显著收益才引入。
+3. **能力决策树**:PyTorch 无对应实现 → 嫁接;有对应且本机(3090)能测 → tiny 测速,TM 快则嫁接、不快则保留;本机不能测 → 默认保留,留 H200 CI 评估。
+
+## 逐类判定
+
+| 类别                                    | 判定                                   | 依据                                                                                                                                                                                                                                                          | 批次                    |
+| --------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| GEMM u4 g128(W4A16/AWQ/GPTQ/CT)         | **嫁接**                               | 本机实测可用,TM 精度反优;GPTQ 为同管线增量                                                                                                                                                                                                                    | 批 1(W4A16)+ 批 2(GPTQ) |
+| GEMM MoE grouped u4                     | **测速定夺**                           | 本机可测;GLM-5.3 有 42 个 sparse 层,收益主场;接缝低-中                                                                                                                                                                                                        | 批 2(benchmark 先行)    |
+| GDN/linear-attn                         | **测速定夺,先测后立项**                | 本机可测(pre_sm90);接缝高(状态池语义 + TMA desc + checkpoint);GLM-5.3 有 34 层,双轨收敛收益大。先做 kernel 级 benchmark(张量直喂,不动状态池)                                                                                                                  | 批 2(benchmark 先行)    |
+| attention GQA/MHA(bf16,PyTorch 标准 KV) | **测速定夺,低预期**                    | 本机可测(SM80 全矩阵);按原则 2 放弃 TM 布局与 packed-KV 后,论文收益主体出局,仅剩 bf16 kernel 本体对照 FA3;前置 = 指针数组 builder(票 06 研究已证可行)                                                                                                         | 批 2(benchmark 先行)    |
+| packed-KV 低比特(kv int4/int8)          | **测速定夺(批 2,kernel 级 benchmark)** | PyTorch 已有 int4/int8/fp8 KV 能力(QuantPolicy 五种 + triton 量化写入),缺的是读取管线效率;TM 差异化 = 三级流水 dequant 内嵌主循环(论文 86-93% BW)。3090 张量直喂可测,不动池;delta 显著才立项路径 B(opt-in TM CacheBackend 布局抽象,抽象层已存在),否则永久出局 | 批 2(benchmark 先行)    |
+| TM KV 写入(rope+量化融合写)             | 随 attention 立项才成对迁移,单独排除   | 绑死 TM KV 池布局                                                                                                                                                                                                                                             | —                       |
+| GEMM dense bf16                         | **不嫁接**                             | TM dense family 本就路由 cuBLAS;论文证无优势                                                                                                                                                                                                                  | —                       |
+| MLA                                     | **不嫁接**(用户确认)                   | TM 为简化 MLA(bf16-only、无 sparse、无 fp8),能力子集;GLM/DeepSeek 系 MLA 一律走 PT flash_mla                                                                                                                                                                  | —                       |
+| MoE DeepEP a2a                          | **不嫁接**                             | 多机通信(原则 1);且 TM C++ dispatcher bf16-only,弱于 PT deep_ep                                                                                                                                                                                               | —                       |
+| GEMM fp8 w8a8(block-128)                | 保留,留 CI                             | kernel 仅 SM90,本机不能测                                                                                                                                                                                                                                     | CI 批                   |
+| GEMM mxfp4 / nvfp4 / mxfp4_fp8          | 保留,留 CI                             | 仅 SM90;nvfp4 系还需补 WeightFormat/converter 分支(CI 上做)                                                                                                                                                                                                   | CI 批                   |
+| fused allreduce+RMSNorm                 | 保留,留 CI                             | TM 独有加分资产(单机多卡 NVLink 融合),单卡不可测                                                                                                                                                                                                              | CI 批                   |
+| rms_norm / 量化小 kernel / rotary       | 保留现状                               | rms_norm PT 已有 triton;量化小 kernel 已随批 1 通道可用;rotary 不可单独嫁接                                                                                                                                                                                   | —                       |
+
+## 批次序列
+
+- **批 1(进行中)**:GEMM dense W4A16 嫁接 = `.scratch/tm-gemm-graft/issues/` 现有 6 票(01 probe、02 TmGemmLinear、03 引擎+金样本、04 repack CLI、05 验收 harness;06 兼容层已延后)。
+- **批 2(测速定夺批)**:五项 benchmark/增量,赢了各立嫁接 spec——① GPTQ 格式(WeightFormat 子类增量);② MoE grouped W4A16 测速;③ GDN kernel 级 benchmark;④ attention bf16 kernel benchmark(低预期,按数据说话);⑤ packed-KV kernel 级 benchmark(TM int8/int4 attention 读取管线 vs PT int8 KV,张量直喂;delta 显著 → 立项路径 B:opt-in TM CacheBackend 布局抽象)。
+- **CI 批(默认保留,留 H200 CI 评估)**:fp8 w8a8、mxfp4、nvfp4/mxfp4_fp8(补 WeightFormat 后)、fused AR+RMSNorm。
+- **不嫁接(终局)**:dense bf16、MLA、DeepEP a2a;TM KV 写入仅在 attention/packed-KV 立项时成对迁移。
+
+## 统一大 env(过渡期切换面)
+
+```
+LMDEPLOY_TM_KERNELS=off | auto | all | <类>=<态>[,...]
+# 类:w4a16 / moe_grouped / gdn / attention / ...(随批次扩展)
+# 态:auto(能力探询,默认)| on(强制,不支持报错)| off(显式关)
+```
+
+- 默认 `auto`;类级 CSV 覆盖全局值。
+- 向后兼容:`LMDEPLOY_W4A16_GEMM_BACKEND` 继续有效;新 env 未指定 `w4a16` 类时旧 env 生效,两者冲突时新 env 优先 + warning。
+- 三态语义与票 02/04 决议一致(auto=探询/显式=强制失败报错/off=原生);CLI 大旋钮按拍板延后(超集后随兼容层)。
+- 落地节奏:批 1 先以既有 `LMDEPLOY_W4A16_GEMM_BACKEND` 运行,统一大 env 在批 2 立项时引入(那时才有第二类 kernel 可选)。
+
+## 与既有决议的衔接
+
+- 票 04 决议修正:格式扩展顺序「GPTQ → w8a8-fp8 → fp4 系」中,fp8/fp4 顺延至 CI 批(本机不能测);GPTQ 留批 2。
+- 票 05 观察项解除:SM86 上 u4 g128 实测可用,3090 dev-loop 全量可跑。
+- attention 批次的 CUDA Graph 前提(指针数组 builder 可行性)已由票 06 研究铺平,但按原则 2 其范围缩至 bf16 + PyTorch 标准 KV。

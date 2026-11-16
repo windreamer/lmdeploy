@@ -1,0 +1,82 @@
+[
+  {
+    "layer": "model.layers.0.mlp.down_proj",
+    "k": 14336,
+    "n": 4096,
+    "kl": 2.1879683117731474e-05,
+    "argmax_agree": 1.0,
+    "max_abs": 0.25,
+    "rel_err_awq_vs_ref": 0.0004045236564707011,
+    "rel_err_tm_vs_ref": 7.011878915363923e-05
+  },
+  {
+    "layer": "model.layers.0.mlp.gate_up_proj",
+    "k": 4096,
+    "n": 28672,
+    "kl": -7.19863531272502e-25,
+    "argmax_agree": 1.0,
+    "max_abs": 0.125,
+    "rel_err_awq_vs_ref": 0.00033289773273281753,
+    "rel_err_tm_vs_ref": 0.0003330779727548361
+  },
+  {
+    "layer": "model.layers.0.self_attn.o_proj",
+    "k": 4096,
+    "n": 4096,
+    "kl": -2.1439190637472933e-21,
+    "argmax_agree": 1.0,
+    "max_abs": 0.125,
+    "rel_err_awq_vs_ref": 4.624801658792421e-05,
+    "rel_err_tm_vs_ref": 1.9678385797305964e-05
+  },
+  {
+    "layer": "model.layers.0.self_attn.qkv_proj",
+    "k": 4096,
+    "n": 4096,
+    "kl": -1.4546165749715566e-35,
+    "argmax_agree": 1.0,
+    "max_abs": 0.125,
+    "rel_err_awq_vs_ref": 4.8340643843403086e-05,
+    "rel_err_tm_vs_ref": 3.271029709139839e-05
+  },
+  {
+    "layer": "model.layers.1.mlp.down_proj",
+    "k": 14336,
+    "n": 4096,
+    "kl": 0.00019015642465092242,
+    "argmax_agree": 1.0,
+    "max_abs": 0.25,
+    "rel_err_awq_vs_ref": 0.0004001727793365717,
+    "rel_err_tm_vs_ref": 6.361254781950265e-05
+  },
+  {
+    "layer": "model.layers.1.mlp.gate_up_proj",
+    "k": 4096,
+    "n": 28672,
+    "kl": -8.258938820220927e-34,
+    "argmax_agree": 1.0,
+    "max_abs": 0.125,
+    "rel_err_awq_vs_ref": 0.0003325456927996129,
+    "rel_err_tm_vs_ref": 0.0003330947074573487
+  },
+  {
+    "layer": "model.layers.1.self_attn.o_proj",
+    "k": 4096,
+    "n": 4096,
+    "kl": -3.728985383787091e-22,
+    "argmax_agree": 1.0,
+    "max_abs": 0.125,
+    "rel_err_awq_vs_ref": 4.551302481559105e-05,
+    "rel_err_tm_vs_ref": 3.4974567824974656e-05
+  },
+  {
+    "layer": "model.layers.1.self_attn.qkv_proj",
+    "k": 4096,
+    "n": 4096,
+    "kl": -8.157122020167312e-25,
+    "argmax_agree": 1.0,
+    "max_abs": 0.125,
+    "rel_err_awq_vs_ref": 4.0691749745747074e-05,
+    "rel_err_tm_vs_ref": 3.936936263926327e-05
+  }
+]
