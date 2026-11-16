@@ -70,6 +70,7 @@ workspace/
 work_dir*/
 workdir/
 wscripts/
+/reports/
 
 # Huggingface
 *.bin

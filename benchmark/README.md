@@ -93,3 +93,24 @@ python3 benchmark_guided.py \
 | `--ignore-eos`       | Force `max_new_tokens` output to isolate pure per-step overhead.   |
 | `--no-baseline`      | Skip the baseline run; only benchmark guided decoding.             |
 | `--csv`              | Append results (baseline + guided rows) to a CSV file.             |
+
+## W4A16 GEMM acceptance harness
+
+`w4a16_acceptance.py` runs the decode rung matrix of the TurboMind W4A16
+graft acceptance (ticket 05): decode batch {1, 2, 4, 8, 16, 32} x seq
+{2k, 32k} x TP, three routes (AWQ Triton baseline, grafted TM route, native
+TurboMind upper reference). It applies the hard gate (decode non-inferior to
+AWQ Triton), reports the graft/native ratio (target >= 0.90, no gate), and
+writes `report.json` plus `report.md`.
+
+```bash
+python benchmark/w4a16_acceptance.py --preset dev     # full matrix, feasible rungs self-mark
+python benchmark/w4a16_acceptance.py --preset smoke   # fast plumbing check
+python benchmark/w4a16_acceptance.py --preset h200    # full matrix incl. TP=2 rungs
+python benchmark/w4a16_acceptance.py --model-preset tiny  # tiny ct geometry run, annotated
+```
+
+Rungs whose KV need exceeds the card fall out with a recorded reason instead
+of silently degrading the concurrent batch. The numeric KL gate is not part
+of this script; it reuses the ticket 03 assets under `tests/pytorch/engine/`
+(see `w4a16_amendment_template.md` for the KL threshold backfill procedure).
