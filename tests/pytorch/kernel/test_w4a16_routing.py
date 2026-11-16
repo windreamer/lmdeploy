@@ -19,8 +19,8 @@ from lmdeploy.pytorch.backends.cuda.awq_modules import (
     AwqLinearW4A16Impl,
     _build_linear_w4a16,
 )
+from lmdeploy.pytorch.backends.cuda.tm_gemm_modules import TurbomindGemmW4A16Impl
 from lmdeploy.pytorch.backends.cuda.tm_probe import turbomind_support_reason
-from lmdeploy.pytorch.backends.cuda.turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
 
 cuda_required = pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')
 
@@ -49,7 +49,7 @@ def test_supported_shape_selects_turbomind(monkeypatch, backend):
     """A registry-supported layer picks TurboMind under auto and forced."""
     _set_backend(monkeypatch, backend)
     impl = _build_linear_w4a16(_spec(**SUPPORTED))
-    assert isinstance(impl, TurbomindAwqLinearW4A16Impl)
+    assert isinstance(impl, TurbomindGemmW4A16Impl)
 
 
 @cuda_required

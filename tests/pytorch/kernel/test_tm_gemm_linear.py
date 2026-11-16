@@ -315,16 +315,16 @@ def test_builder_other_value_keeps_triton(monkeypatch):
 
 @cuda_required
 def test_w4a16_dispatch_unchanged(monkeypatch):
-    """The legacy W4A16 spec still routes through the ticket 01 builder."""
+    """The legacy W4A16 spec routes through the ticket 01 builder to the
+    unified TurboMind implementation."""
     from lmdeploy.pytorch.backends import get_backend
-    from lmdeploy.pytorch.backends.cuda.turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
 
     _set_backend(monkeypatch, 'auto')
     spec = LinearW4A16BuildSpec(
         in_features=512, out_features=256, w_bit=4, group_size=128, bias=False, output_dtype=torch.float16
     )
     impl = get_backend().build_op(spec)
-    assert isinstance(impl, (AwqLinearW4A16Impl, TurbomindAwqLinearW4A16Impl))
+    assert isinstance(impl, TurbomindGemmW4A16Impl)
     spec_tm = LinearTmGemmBuildSpec(
         in_features=512, out_features=256, w_bit=4, group_size=128, bias=False, output_dtype=torch.float16
     )

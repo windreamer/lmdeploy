@@ -77,18 +77,15 @@ def _build_linear_w4a16(spec: LinearW4A16BuildSpec) -> LinearW4A16Impl:
         reason = turbomind_support_reason(spec.in_features, spec.out_features,
                                           spec.w_bit, spec.group_size, spec.output_dtype)
         if reason is None:
-            from .turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
-            impl_cls = TurbomindAwqLinearW4A16Impl
+            from .tm_gemm_modules import TurbomindGemmW4A16Impl
+            logger.debug('Build LinearW4A16 with TurbomindGemmW4A16Impl.')
+            return TurbomindGemmW4A16Impl(spec.in_features, spec.out_features, spec.group_size)
         elif provider == 'turbomind':
             from lmdeploy import turbomind
 
             raise RuntimeError(
                 f'TurboMind W4A16 linear was requested but is unavailable or incompatible: {reason}.'
             ) from turbomind._import_error
-        else:
-            impl_cls = AwqLinearW4A16Impl
-    else:
-        impl_cls = AwqLinearW4A16Impl
 
-    logger.debug('Build LinearW4A16 with %s.', impl_cls.__name__)
-    return impl_cls(spec.in_features, spec.out_features, spec.w_bit, spec.group_size)
+    logger.debug('Build LinearW4A16 with AwqLinearW4A16Impl.')
+    return AwqLinearW4A16Impl(spec.in_features, spec.out_features, spec.w_bit, spec.group_size)
