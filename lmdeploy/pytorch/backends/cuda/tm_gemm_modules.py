@@ -34,7 +34,7 @@ class TurbomindGemmW4A16Impl(LinearW4A16Impl):
     """Adapt AWQ W4A16 parameters to the TurboMind Linear API with spill
     support and SiLU gate/up fusion."""
 
-    # The channel has no one-input-many-weights entry; keep batched
+    # The channel has no one-input-many-weights entry. Keep batched
     # projections on their per-projection fallback.
     supports_batched = False
 
@@ -94,7 +94,7 @@ class TurbomindGemmW4A16Impl(LinearW4A16Impl):
         linear = get_linear()
         if self._plan is None:
             # The registry query is deterministic for a fixed format and
-            # dtype; cache it so hot updates skip the family walk.
+            # dtype. Cache it so hot updates skip the family walk.
             self._plan = linear.get_weight_plan(
                 weight_format=AWQFormat(block_in=self.group_size),
                 dtype=scales[0].dtype if self.fusion_type == 'silu' else scales.dtype,
@@ -153,7 +153,7 @@ class TurbomindGemmW4A16Impl(LinearW4A16Impl):
         exec_plan = linear.get_exec_plan(x, weight)
         out, _ = linear(x, weight, exec_plan=exec_plan)
 
-        # The kernel has no epilogue bias; add it per layer in python.
+        # The kernel has no epilogue bias. Add it per layer in python.
         if bias is not None:
             out = out + bias
 
@@ -185,11 +185,14 @@ def _build_linear_tm_gemm(spec: LinearTmGemmBuildSpec) -> LinearW4A16Impl:
     unsupported layer, any other value keeps the Triton kernel.
     """
     provider = _envs.w4a16_gemm_backend
+    label = spec.prefix or 'w4a16_linear'
+    shapes = f'{spec.in_features}x{spec.out_features}'
     if provider in ('auto', 'turbomind'):
         reason = turbomind_support_reason(
             spec.in_features, spec.out_features, spec.w_bit, spec.group_size, spec.output_dtype
         )
         if reason is None:
+            logger.info(f'W4A16 GEMM routing: {label} [{shapes}] -> turbomind (backend={provider}).')
             return TurbomindGemmW4A16Impl(
                 spec.in_features,
                 spec.out_features,
@@ -203,5 +206,9 @@ def _build_linear_tm_gemm(spec: LinearTmGemmBuildSpec) -> LinearW4A16Impl:
             raise RuntimeError(
                 f"TurboMind GEMM linear was requested but is unavailable or incompatible: {reason}."
             ) from turbomind._import_error
-    logger.debug('Build LinearTmGemm with AWQ Triton fallback.')
+        detail = f'fallback: {reason}'
+    else:
+        # Any value other than auto/turbomind keeps the historical Triton path.
+        detail = f'backend={provider}'
+    logger.info(f'W4A16 GEMM routing: {label} [{shapes}] -> awq triton ({detail}).')
     return AwqLinearW4A16Impl(spec.in_features, spec.out_features, spec.w_bit, spec.group_size)

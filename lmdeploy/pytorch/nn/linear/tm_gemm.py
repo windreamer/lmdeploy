@@ -1,5 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""W4A16 linear layer backed by the TurboMind GEMM channel."""
+"""W4A16 linear layers backed by the TurboMind GEMM channel.
+
+The shapes mirror the AWQ family (plain, merged, QKV). A shared mixin swaps the backend operator and the post-load
+weight update; everything else -- weight layout, loaders, TP splitting, forward plumbing -- stays inherited from the AWQ
+classes.
+"""
+
+from contextlib import nullcontext
 
 import torch
 
@@ -9,74 +16,46 @@ from lmdeploy.pytorch.backends.cuda.tm_weight_release import TorchWeightSpill
 from lmdeploy.pytorch.backends.tm_gemm_modules import LinearTmGemmBuildSpec
 from lmdeploy.pytorch.models.patch import get_build_model_context
 
-from .awq import AwqLinear
+from .awq import AwqLinear, MergedAwqLinear, QKVAwqLinear
 
 
-class TmGemmLinear(AwqLinear):
-    """W4a16 linear that prefers the TurboMind GEMM kernel.
+class TmGemmLinearMixin:
+    """TurboMind GEMM adaptation shared by the plain, merged, and QKV linears.
 
-    Falls back to the AWQ Triton kernel per layer when the registry probe
-    rejects the shape, mirroring the ``LMDEPLOY_W4A16_GEMM_BACKEND``
-    semantics.
+    Two seams of the AWQ shapes are overridden:
 
-    ``release_torch_weights`` spills the raw torch weights to exact CPU
-    copies after packing and frees the GPU storage. Hot updates restore the
-    module from the copies through the wrapped loaders, then re-pack. Build
-    modules that feed ``get_unquantized_weight`` (MLA absorption such as
-    kv_b_proj) with ``release_torch_weights=False``; they keep their torch
-    copies (see SPEC.md weight release, MLA exemption clause).
+    - ``_build_impl`` requests ``LinearTmGemmBuildSpec``. The backend probe
+      then picks the TurboMind kernel per module and falls back to the AWQ
+      Triton kernel otherwise, mirroring the ``LMDEPLOY_W4A16_GEMM_BACKEND``
+      semantics.
+    - ``update_weights`` packs into the TurboMind channel and then spills the
+      raw torch weights to exact CPU copies, freeing GPU storage.
+
+    ``release_torch_weights`` enables the spill. Build modules that feed
+    ``get_unquantized_weight`` (MLA absorption such as kv_b_proj) with
+    ``release_torch_weights=False``; they keep their torch copies (see
+    SPEC.md weight release, MLA exemption clause).
     """
 
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        w_bit: int,
-        group_size: int,
-        bias: bool,
-        device: torch.device | None = None,
-        colwise: bool = True,
-        is_tp: bool = False,
-        all_reduce: bool = True,
-        layer_type: str = 'attn',
-        release_torch_weights: bool = True,
-    ):
-        self.release_torch_weights = release_torch_weights
-        self._spill: TorchWeightSpill | None = None
-        super(AwqLinear, self).__init__(
-            dtype=torch.float16,
-            device=device,
-            colwise=colwise,
-            is_tp=is_tp,
-            all_reduce=all_reduce,
-            layer_type=layer_type,
-        )
-        if self.is_tp:
-            in_features, out_features = self._get_io_features(in_features, out_features, w_bit, group_size, colwise)
-        qweight, scales, qzeros, bias = self.create_weights(
-            in_features, out_features, w_bit, group_size, bias, self.dtype, self.device
-        )
-        device_guard = torch.cuda.device(scales.device) if scales.is_cuda else __import__('contextlib').nullcontext()
+    def _build_impl(self, in_features: int, out_features: int, w_bit: int, group_size: int, bias: bool,
+                    output_dtype: torch.dtype, device: torch.device):
+        """Build the backend operator with the TurboMind GEMM spec."""
+        # Provider checks must inspect the device that owns these weights.
+        device_guard = torch.cuda.device(device) if device.type == 'cuda' else nullcontext()
         with device_guard:
-            self.impl = get_backend().build_op(
+            return get_backend().build_op(
                 LinearTmGemmBuildSpec(
                     in_features=in_features,
                     out_features=out_features,
                     w_bit=w_bit,
                     group_size=group_size,
-                    bias=bias is not None,
-                    output_dtype=scales.dtype,
+                    bias=bias,
+                    output_dtype=output_dtype,
                     release_torch_weights=self.release_torch_weights,
+                    prefix=self.tm_prefix,
                 ),
                 enable_deterministic=get_build_model_context().enable_deterministic,
             )
-        self.register_all_parameters(qweight, scales, qzeros, bias)
-
-        self.in_features = in_features
-        self.out_features = out_features
-        self.w_bit = w_bit
-        self.group_size = group_size
-        self.elem_per_int = 32 // w_bit
 
     def update_weights(self):
         """Pack into the TurboMind channel, then spill the torch weights."""
@@ -94,4 +73,114 @@ class TmGemmLinear(AwqLinear):
                 scales=self.scales,
                 qzeros=self.qzeros,
             )
+        )
+
+
+class TmGemmLinear(TmGemmLinearMixin, AwqLinear):
+    """W4a16 linear that prefers the TurboMind GEMM kernel.
+
+    Falls back to the AWQ Triton kernel per layer when the registry probe
+    rejects the shape, mirroring the ``LMDEPLOY_W4A16_GEMM_BACKEND``
+    semantics.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        w_bit: int,
+        group_size: int,
+        bias: bool,
+        device: torch.device | None = None,
+        colwise: bool = True,
+        is_tp: bool = False,
+        all_reduce: bool = True,
+        layer_type: str = 'attn',
+        release_torch_weights: bool = True,
+        prefix: str = '',
+    ):
+        # The mixin reads these while the AWQ base class builds the operator.
+        self.release_torch_weights = release_torch_weights
+        self._spill: TorchWeightSpill | None = None
+        self.tm_prefix = prefix
+        super().__init__(
+            in_features,
+            out_features,
+            w_bit=w_bit,
+            group_size=group_size,
+            bias=bias,
+            device=device,
+            colwise=colwise,
+            is_tp=is_tp,
+            all_reduce=all_reduce,
+            layer_type=layer_type,
+        )
+
+
+class MergedTmGemmLinear(TmGemmLinearMixin, MergedAwqLinear):
+    """Merged AWQ linear that prefers the TurboMind GEMM kernel.
+
+    Gate/up style merged projections issue one TurboMind GEMM call over the concatenated output columns.
+    """
+
+    def __init__(self,
+                 in_features: int,
+                 all_out_features: list[int],
+                 w_bit: int,
+                 group_size: int,
+                 bias: bool,
+                 device: torch.device | None = None,
+                 is_tp: bool = True,
+                 out_names: list[int] | None = None,
+                 layer_type: str = 'attn',
+                 release_torch_weights: bool = True,
+                 prefix: str = ''):
+        self.release_torch_weights = release_torch_weights
+        self._spill: TorchWeightSpill | None = None
+        self.tm_prefix = prefix
+        super().__init__(
+            in_features,
+            all_out_features=all_out_features,
+            w_bit=w_bit,
+            group_size=group_size,
+            bias=bias,
+            device=device,
+            is_tp=is_tp,
+            out_names=out_names,
+            layer_type=layer_type,
+        )
+
+
+class QKVTmGemmLinear(TmGemmLinearMixin, QKVAwqLinear):
+    """QKV AWQ linear that prefers the TurboMind GEMM kernel."""
+
+    def __init__(self,
+                 in_features: int,
+                 num_q_heads: int,
+                 num_kv_heads: int,
+                 head_size: int,
+                 head_size_v: int,
+                 w_bit: int,
+                 group_size: int,
+                 bias: bool = False,
+                 device: torch.device | None = None,
+                 is_tp: bool = True,
+                 num_replicate_kv_heads: int = 1,
+                 release_torch_weights: bool = True,
+                 prefix: str = ''):
+        self.release_torch_weights = release_torch_weights
+        self._spill: TorchWeightSpill | None = None
+        self.tm_prefix = prefix
+        super().__init__(
+            in_features,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            head_size_v=head_size_v,
+            w_bit=w_bit,
+            group_size=group_size,
+            bias=bias,
+            device=device,
+            is_tp=is_tp,
+            num_replicate_kv_heads=num_replicate_kv_heads,
         )

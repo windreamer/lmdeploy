@@ -136,3 +136,168 @@ def gen_tiny_ct(out_dir: str,
 def load_shard(model_dir: str, key: str) -> dict:
     """Load one shard of a generated (or converted) directory by key."""
     return torch.load(os.path.join(model_dir, f'{key}.pt'), map_location='cpu', weights_only=True)
+
+
+# Dense llama geometry scaled down to engine-test size. Every input dim is a
+# multiple of GROUP_SIZE and every output dim a multiple of 128, which the
+# AWQ weight loaders require even at TP=1 (their chunk alignment asserts on
+# the checkpoint shard dims). head_dim stays a legal attention width.
+TINY_HF_GEOMETRY = dict(
+    hidden_size=128,
+    intermediate_size=256,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    num_key_value_heads=4,
+    head_dim=32,
+)
+
+_TINY_TOKENIZER_FILES = ('tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json')
+
+
+def _vocab_size_from_tokenizer(tokenizer_src: str) -> int:
+    """Read the largest vocab id plus one from the tokenizer files."""
+    with open(os.path.join(tokenizer_src, 'tokenizer.json'), encoding='utf-8') as f:
+        tokenizer_json = json.load(f)
+    size = len(tokenizer_json['model']['vocab'])
+    for added in tokenizer_json.get('added_tokens', ()):
+        size = max(size, added['id'] + 1)
+    return size
+
+
+def _token_id(tokenizer_src: str, token) -> int | None:
+    """Resolve a tokenizer special token entry to its id.
+
+    ``tokenizer_config.json`` may carry the token as a string or as a dict
+    with the id; plain ints pass through. Unknown shapes return None so the
+    model config omits the field.
+    """
+    if isinstance(token, int):
+        return token
+    if isinstance(token, dict):
+        token = token.get('id')
+        return token if isinstance(token, int) else None
+    if isinstance(token, str):
+        with open(os.path.join(tokenizer_src, 'tokenizer.json'), encoding='utf-8') as f:
+            tokenizer_json = json.load(f)
+        vocab = tokenizer_json['model']['vocab']
+        if token in vocab:
+            return vocab[token]
+        for added in tokenizer_json.get('added_tokens', ()):
+            if added.get('content') == token:
+                return added['id']
+    return None
+
+
+def gen_tiny_ct_hf(out_dir: str, tokenizer_src: str, seed: int = 9, num_layers: int = 2) -> dict:
+    """Write a tiny compressed-tensors W4A16 checkpoint in HF layout.
+
+    The directory loads through the pytorch engine like any ct checkpoint:
+    ``config.json`` carries the compressed-tensors quantization config, the
+    safetensors file carries ct keys (``weight_packed``/``weight_scale``/
+    ``weight_zero_point``) on every linear, and embedding, norms, and lm_head
+    stay unquantized. Tokenizer files are copied from ``tokenizer_src``, so
+    prompts tokenize with real text. The same seed reproduces byte-identical
+    weights.
+    """
+    import shutil
+
+    from safetensors.torch import save_file
+
+    for name in _TINY_TOKENIZER_FILES:
+        src = os.path.join(tokenizer_src, name)
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f'tokenizer file missing: {src}')
+    os.makedirs(out_dir, exist_ok=True)
+    for name in _TINY_TOKENIZER_FILES:
+        shutil.copy(os.path.join(tokenizer_src, name), os.path.join(out_dir, name))
+
+    geometry = dict(TINY_HF_GEOMETRY)
+    geometry['num_hidden_layers'] = num_layers
+    hidden = geometry['hidden_size']
+    heads = geometry['num_attention_heads']
+    kv_heads = geometry['num_key_value_heads']
+    head_dim = geometry['head_dim']
+    inter = geometry['intermediate_size']
+    vocab_size = _vocab_size_from_tokenizer(tokenizer_src)
+
+    torch.manual_seed(seed)
+
+    def quantized(name: str, n: int, k: int) -> dict:
+        # Per-group outlier on the first group element keeps scales away
+        # from zero, matching the placeholder generator.
+        w = torch.randn(n, k, dtype=WEIGHT_DTYPE)
+        w.view(n, k // GROUP_SIZE, GROUP_SIZE)[:, :, 0] *= 3.0
+        packed, scale, zero = quantize_ct(w)
+        return {
+            f'{name}.weight_packed': packed,
+            f'{name}.weight_scale': scale,
+            f'{name}.weight_zero_point': zero,
+        }
+
+    tensors: dict[str, torch.Tensor] = {
+        'model.embed_tokens.weight': torch.randn(vocab_size, hidden, dtype=WEIGHT_DTYPE) * 0.02,
+    }
+    for layer in range(num_layers):
+        prefix = f'model.layers.{layer}'
+        tensors.update(quantized(f'{prefix}.self_attn.q_proj', heads * head_dim, hidden))
+        tensors.update(quantized(f'{prefix}.self_attn.k_proj', kv_heads * head_dim, hidden))
+        tensors.update(quantized(f'{prefix}.self_attn.v_proj', kv_heads * head_dim, hidden))
+        tensors.update(quantized(f'{prefix}.self_attn.o_proj', hidden, heads * head_dim))
+        tensors.update(quantized(f'{prefix}.mlp.gate_proj', inter, hidden))
+        tensors.update(quantized(f'{prefix}.mlp.up_proj', inter, hidden))
+        tensors.update(quantized(f'{prefix}.mlp.down_proj', hidden, inter))
+        tensors[f'{prefix}.input_layernorm.weight'] = torch.ones(hidden, dtype=WEIGHT_DTYPE)
+        tensors[f'{prefix}.post_attention_layernorm.weight'] = torch.ones(hidden, dtype=WEIGHT_DTYPE)
+    tensors['model.norm.weight'] = torch.ones(hidden, dtype=WEIGHT_DTYPE)
+    tensors['lm_head.weight'] = torch.randn(vocab_size, hidden, dtype=WEIGHT_DTYPE) * 0.02
+    save_file(tensors, os.path.join(out_dir, 'model.safetensors'))
+
+    tokenizer_config = {}
+    tok_cfg_path = os.path.join(tokenizer_src, 'tokenizer_config.json')
+    if os.path.isfile(tok_cfg_path):
+        with open(tok_cfg_path, encoding='utf-8') as f:
+            tokenizer_config = json.load(f)
+    config = {
+        'architectures': ['LlamaForCausalLM'],
+        'model_type': 'llama',
+        'torch_dtype': 'float16',
+        'hidden_size': hidden,
+        'intermediate_size': inter,
+        'num_hidden_layers': num_layers,
+        'num_attention_heads': heads,
+        'num_key_value_heads': kv_heads,
+        'head_dim': head_dim,
+        'vocab_size': vocab_size,
+        'max_position_embeddings': 512,
+        'rms_norm_eps': 1e-5,
+        'rope_theta': 10000.0,
+        'tie_word_embeddings': False,
+        'attention_bias': False,
+        'bos_token_id': _token_id(tokenizer_src, tokenizer_config.get('bos_token')),
+        'eos_token_id': _token_id(tokenizer_src, tokenizer_config.get('eos_token')),
+        'quantization_config': {
+            'quant_method': 'compressed-tensors',
+            'format': 'pack-quantized',
+            'quantization_status': 'compressed',
+            'config_groups': {
+                'group_0': {
+                    'targets': ['Linear'],
+                    'input_activations': None,
+                    'output_activations': None,
+                    'weights': {
+                        'num_bits': 4,
+                        'group_size': GROUP_SIZE,
+                        'strategy': 'group',
+                        'symmetric': True,
+                        'dynamic': False,
+                        'type': 'int',
+                    },
+                }
+            },
+            'ignore': [],
+        },
+        'seed': seed,
+    }
+    with open(os.path.join(out_dir, 'config.json'), 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2)
+    return config

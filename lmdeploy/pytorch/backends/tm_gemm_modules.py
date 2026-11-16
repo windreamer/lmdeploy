@@ -30,7 +30,7 @@ class LinearTmGemmBuildSpec(BuildSpec[LinearW4A16Impl]):
     # Spill the packed GPU torch weights to an exact CPU copy after packing
     # and free the GPU storage. Hot updates restore from the copy and re-pack.
     # Modules that consume ``get_unquantized_weight`` (MLA absorption such as
-    # kv_b_proj) must be built with this disabled; see SPEC.md, weight
+    # kv_b_proj) must be built with this disabled. See SPEC.md, weight
     # release decision and its MLA exemption clause.
     release_torch_weights: bool = True
     # ``'silu'`` packs gate/up with ``Linear.fuse_weight`` so the kernel
@@ -38,3 +38,6 @@ class LinearTmGemmBuildSpec(BuildSpec[LinearW4A16Impl]):
     # bias because the epilogue activation leaves no place for a per-half
     # bias add.
     fusion_type: str | None = None
+    # Module path carried for routing logs only. It never affects the built
+    # operator.
+    prefix: str = ''

@@ -41,6 +41,7 @@ from lmdeploy.pytorch.utils import get_gpu_memory, monkey_patch_hf_modules_cache
 from lmdeploy.pytorch.weight_loader.model_weight_loader import (
     ModelWeightLoader,
     load_model_weights,
+    normalize_ct_weights,
     process_weights_after_loading,
 )
 from lmdeploy.serve.openai.protocol import (
@@ -1797,7 +1798,8 @@ class BaseModelAgent:
                                             (spec_model, draft_weights, 'draft')]:
             if target is None or not target_weights:
                 continue
-            renamed = list(ModelWeightLoader._rename_weights_iterator(target_weights, target))
+            renamed = list(normalize_ct_weights(
+                ModelWeightLoader._rename_weights_iterator(target_weights, target)))
             logger.info(f'{op_name}: {tag}_num_tensors={len(renamed)}')
             target.load_weights(iter(renamed))
 
