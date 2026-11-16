@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately)。
 
-**Status:** ready-for-agent
+**Status:** done(commit `1e44bb98`,2026-11-16)
 
-- [ ] env 三态单测矩阵:auto(支持→TM/不支持→Triton)、turbomind(支持→TM/不支持→RuntimeError)、其他→Triton
-- [ ] 探询拒绝组合表落地(shape/家族×arch 的拒绝理由可读)
-- [ ] 3090 上 W4A16 模型 auto 态选择断言(TM 被选中)
-- [ ] 既有 AWQ Triton 路径行为不回归(既有单测全绿)
+- [x] env 三态单测矩阵:auto(支持→TM/不支持→Triton)、turbomind(支持→TM/不支持→RuntimeError)、其他→Triton(14 passed)
+- [x] 探询拒绝组合表落地(shape/家族×arch 的拒绝理由可读)
+- [x] 3090 上 W4A16 模型 auto 态选择断言(TM 被选中)
+- [x] 既有 AWQ Triton 路径行为不回归(相关单测 26 passed, 3 skipped)

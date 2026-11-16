@@ -54,7 +54,7 @@ workflow: 本仓库开发分支 + 每阶段一个 commit + 向上游 stack PR
 - **通信**:全部由 python 分布式层承接(all_reduce 与 reduce_scatter 两式),TM 通道不感知通信。
 - **batched**:不支持 batched 前向(`supports_batched=False`),显式拒绝而非错误复用。
 - **bias**:kernel 无 epilogue-bias,python 逐层相加。
-- **repack CLI**:compressed-tensors W4A16 g128 sym → AutoAWQ 布局;AWQ 沿 N 打包(nibble 序 \[0,4,1,5,2,6,3,7\]),qzeros 补零约定 `0x88888888`;流式按分片处理。`tiny ct` 生成器同库交付(测试资产)。
+- **compressed-tensors 加载时转换**:W4A16 模型含 ct 键名时,weight_loader 检测并内存内规范化为 canonical AWQ(复用位级转换函数:AWQ 沿 N 打包 nibble 序 \[0,4,1,5,2,6,3,7\]、qzeros 补零约定 `0x88888888`);流式 per-module,无离线 CLI、无磁盘双份权重。tiny-ct 生成器为测试资产。
 - **兼容层(延后)**:建立时机 = PyTorch 引擎能力(含已嫁接 TM kernel)成为 TurboMind 后端**超集**之后。届时 `--backend turbomind` 保留为合法取值并透明路由 PyTorch 引擎,TurboMind 专有配置键警告忽略;该层是删除 C++ runtime 的前置条件。过渡期 `--backend turbomind` 行为不变(指向 C++ 引擎),近期能力切换由 env 旋钮承载,不做 CLI 级别名。
 - **kernel 正确性假设**(带三边界):TM kernel 内部数值正确为工作假设,验证集中于调用契约;①仅覆盖有生产暴露的 family×arch(SM86 路径与 fp4 系除外);②对照不通过先查边界后查 kernel;③family×arch/量化格式/pack 路径任一变化即回到未验证。
 - **验收矩阵**:Llama-3-8B-AWQ(3090 dev-loop + H200 验收)、GLM tiny(几何覆盖)、GLM 真模档(上游 CI);档位 decode batch {1,2,4,8,16,32} × seq {≈2k, ≈32k},含 TP=2;性能硬门槛唯一 = decode 非劣 AWQ Triton,对原生 TurboMind 比率 ≥90% 为报告项;KL 阈值按 T1 首跑分布定后回填本规格(已有数据点:最坏 1.9e-4)。
