@@ -1,0 +1,50 @@
+[
+ {
+  "mode": "recurrent",
+  "bsz": 1,
+  "tokens": 1,
+  "tm_ms": 0.01346,
+  "pt_ms": 0.0471,
+  "speedup_pt_over_tm": 3.501
+ },
+ {
+  "mode": "recurrent",
+  "bsz": 8,
+  "tokens": 1,
+  "tm_ms": 0.09421,
+  "pt_ms": 0.17658,
+  "speedup_pt_over_tm": 1.874
+ },
+ {
+  "mode": "recurrent",
+  "bsz": 32,
+  "tokens": 1,
+  "tm_ms": 0.38093,
+  "pt_ms": 0.53504,
+  "speedup_pt_over_tm": 1.405
+ },
+ {
+  "mode": "chunked",
+  "bsz": 1,
+  "tokens": 256,
+  "tm_ms": 0.26726,
+  "pt_ms": 0.36147,
+  "speedup_pt_over_tm": 1.352
+ },
+ {
+  "mode": "chunked",
+  "bsz": 1,
+  "tokens": 1024,
+  "tm_ms": 0.91386,
+  "pt_ms": 0.5928,
+  "speedup_pt_over_tm": 0.649
+ },
+ {
+  "mode": "chunked",
+  "bsz": 8,
+  "tokens": 256,
+  "tm_ms": 1.78944,
+  "pt_ms": 1.08339,
+  "speedup_pt_over_tm": 0.605
+ }
+]

@@ -30,6 +30,16 @@ Copyright (c) OpenMMLab. All rights reserved.
 | fused allreduce+RMSNorm                 | 保留,留 CI                             | TM 独有加分资产(单机多卡 NVLink 融合),单卡不可测                                                                                                                                                                                                              | CI 批                   |
 | rms_norm / 量化小 kernel / rotary       | 保留现状                               | rms_norm PT 已有 triton;量化小 kernel 已随批 1 通道可用;rotary 不可单独嫁接                                                                                                                                                                                   | —                       |
 
+## 批 2 · 判定(2026-11-16 实测,`benchmark/batch2_benchmarks_report.md`)
+
+- **GPTQ 格式**:✅ 落地(commit `174a975a`)——转换库 + 加载时转换 + TM GEMM 路由,S1 双参照全绿。
+- **MoE grouped W4A16**:✅ **嫁接胜出**——288 专家 top-8 GLM-5.3 几何,m=1/8/32 下 TM = Triton 的 1.58×/3.87×/7.67×;SM86 上 u4 grouped 无 gated-silu 融合,走独立 w1/w3(与 TM C++ 生产一致)→ **批 3 嫁接 spec 首项**。
+- **GDN**:✅ **分裂判定**——recurrent decode TM 1.41–3.50×(B=1/8/32)→ 嫁接 decode;chunked prefill PT fla 反超(T=1024/B=8 时 TM 仅 0.61–0.65×)→ prefill 保留 fla,双轨。状态池语义(复合块 vs indexed pool)为嫁接 spec 的核心决策项。
+- **attention bf16**:❌ **不嫁接**(低预期兑现)——吞吐档(B=128/klen=4096)仅 1.04×,中档 1.1–1.5×;FA3 基线留 H200 CI 复测。
+- **packed-KV int8**:✅ **立项路径 B(opt-in TM CacheBackend 布局抽象)**——生产档 TM = PT 的 1.34–1.86×,小 batch 2.9–7.5×;归因实证:TM int8-vs-bf16 = 1.7–1.9×,PT int8-vs-bf16 仅 1.2–1.3×,三级流水 dequant 的 delta 真实存在。与 TM int8 attention decode kernel 成对立项,成对迁移 KV 融合写。
+
+**批 3 组成(由批 2 判定生成)**:① MoE grouped W4A16 嫁接 spec;② GDN decode 嫁接 spec(chunked 保留 fla);③ packed-KV int8 + TM attention decode kernel 整层立项 spec(含 opt-in CacheBackend 布局)。
+
 ## 批次序列
 
 - **批 1(进行中)**:GEMM dense W4A16 嫁接 = `.scratch/tm-gemm-graft/issues/` 现有 6 票(01 probe、02 TmGemmLinear、03 引擎+金样本、04 repack CLI、05 验收 harness;06 兼容层已延后)。

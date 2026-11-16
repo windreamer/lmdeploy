@@ -1,0 +1,20 @@
+[
+ {
+  "m": 1,
+  "tm_plain": 0.407,
+  "pt": 0.6435,
+  "pt_over_best_tm": 1.581
+ },
+ {
+  "m": 8,
+  "tm_plain": 1.09,
+  "pt": 4.2229,
+  "pt_over_best_tm": 3.874
+ },
+ {
+  "m": 32,
+  "tm_plain": 2.923,
+  "pt": 22.4236,
+  "pt_over_best_tm": 7.671
+ }
+]
