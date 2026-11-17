@@ -71,14 +71,14 @@ The rung suites emit this shape automatically
 (`benchmark/w4a16_acceptance.py --suite {moe,int8kv,tp2}`, output under
 `reports/w4a16/b306_*/`). Keep the manual backfill fields aligned:
 
-| field                | MoE rung                                   | int8-KV rung                                        | TP=2 rung                   |
-| -------------------- | ------------------------------------------ | --------------------------------------------------- | --------------------------- |
-| routes (ref -> cand) | triton fused_moe (fp16 twin) -> TM grouped | stock int8 KV -> TM int8 block layout               | matrix readiness, no timing |
-| numeric gate         | KL ≤ `MOE_TINY_KL_THRESHOLD`, top-1 report | KL ≤ 2e-3, top-1 report                             | n/a (declaration)           |
-| throughput table     | b ∈ {1, 8, 32}, TM/Triton per batch        | b ∈ {1, 8, 32}, on/off per batch                    | skip reasons per rung       |
-| smoke tier           | b=1, 8 tokens, 0 timed passes              | same                                                | n/a                         |
-| placement            | `reports/w4a16/b306_moe/`                  | `reports/w4a16/b306_int8kv/`                        | `reports/w4a16/b306_tp2/`   |
-| known blockers           | none                                         | none on the fixed source; a fixed/PRESENT probe guards stale checkouts | single-GPU host; H200 item |
+| field                | MoE rung                                   | int8-KV rung                                                           | TP=2 rung                   |
+| -------------------- | ------------------------------------------ | ---------------------------------------------------------------------- | --------------------------- |
+| routes (ref -> cand) | triton fused_moe (fp16 twin) -> TM grouped | stock int8 KV -> TM int8 block layout                                  | matrix readiness, no timing |
+| numeric gate         | KL ≤ `MOE_TINY_KL_THRESHOLD`, top-1 report | KL ≤ 2e-3, top-1 report                                                | n/a (declaration)           |
+| throughput table     | b ∈ {1, 8, 32}, TM/Triton per batch        | b ∈ {1, 8, 32}, on/off per batch                                       | skip reasons per rung       |
+| smoke tier           | b=1, 8 tokens, 0 timed passes              | same                                                                   | n/a                         |
+| placement            | `reports/w4a16/b306_moe/`                  | `reports/w4a16/b306_int8kv/`                                           | `reports/w4a16/b306_tp2/`   |
+| known blockers       | none                                       | none on the fixed source; a fixed/PRESENT probe guards stale checkouts | single-GPU host; H200 item  |
 
 Amendment rule for the int8-KV threshold: same procedure as sections 2-4 —
 first measured on/off distribution fixes the number, the constant

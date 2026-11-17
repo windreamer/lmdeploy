@@ -49,10 +49,10 @@ source-state probe now only reports fixed/PRESENT, so the on-route
 numbers below come from the real path:
 
 | batch | stock int8 KV tok/s | TM int8 layout tok/s | TM/stock |
-|---|---|---|---|
-| 1 | 797.6 | 63.7 | 0.08 |
-| 8 | 797.5 | 492.5 | 0.64 |
-| 32 | 749.5 | 920.7 | 1.23 |
+| ----- | ------------------- | -------------------- | -------- |
+| 1     | 797.6               | 63.7                 | 0.08     |
+| 8     | 797.5               | 492.5                | 0.64     |
+| 32    | 749.5               | 920.7                | 1.23     |
 
 Numeric gate: **PASS** — worst truncated KL 3.50e-06 ≤ 2e-3, top-1
 agreement 1.00. No threshold amendment needed; the measured distribution
