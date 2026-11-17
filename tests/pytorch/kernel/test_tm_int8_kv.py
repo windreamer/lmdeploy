@@ -47,7 +47,11 @@ def _block_offsets():
 
 
 def _cu(vals):
-    return torch.nn.functional.pad(torch.cumsum(torch.tensor(vals, dtype=torch.int32), 0), (1, 0)).cuda()
+    # torch.cumsum promotes int32 to int64 unless the dtype is pinned; the
+    # TM bindings read `const int*`, so an int64 array interleaves garbage
+    # and writes out of bounds (the B3-07 harness root cause).
+    return torch.nn.functional.pad(
+        torch.cumsum(torch.tensor(vals, dtype=torch.int32), 0, dtype=torch.int32), (1, 0)).cuda()
 
 
 def _allocate_layout():
@@ -112,27 +116,100 @@ def _assert_gate(out, ref, label):
     return max_abs, kl, argmatch
 
 
-def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0, batch=BATCH):
-    """One TM write-kernel append of new tokens (token-major slices)."""
+def _pool_codes(pool, layer=0):
+    """Raw uint8 codes gathered into (B, klen, H, D) sequence order, for K then
+    V — the write-level ground truth under the block.h arrangement."""
+    h2sd = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
+    codes = pool[layer, :, :h2sd].view(NUM_BLOCKS, NUM_KV_HEADS, 2, BLOCK_LEN, HEAD_DIM)
+    k = codes[:, :, 0].permute(0, 2, 1, 3).reshape(NUM_BLOCKS * BLOCK_LEN, NUM_KV_HEADS, HEAD_DIM)
+    v = codes[:, :, 1].permute(0, 2, 1, 3).reshape(NUM_BLOCKS * BLOCK_LEN, NUM_KV_HEADS, HEAD_DIM)
+    return _gather_by_block_table(k, KLEN), _gather_by_block_table(v, KLEN)
+
+
+def _assert_code_match(pool, k_src, v_src, label, floor=0.99):
+    """Placement-level code gate: each pool slot's code bytes must equal the
+    quantization of the bf16 source token computed under THAT slot's stored
+    (scale, min) params. A cross-wired or misplaced token quantizes under the
+    wrong params and fails the byte comparison, so this localizes write
+    defects that tolerance-based decode gates cannot (the historical false
+    green: 0.67% correct placement under passing budgets)."""
+    got_k, got_v = _pool_codes(pool)
+    h2sd = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
+    codes_all = pool[..., :h2sd].view(pool.shape[0], NUM_BLOCKS, NUM_KV_HEADS, 2, BLOCK_LEN, HEAD_DIM)
+    params_all = pool[..., h2sd:].view(torch.bfloat16).view(pool.shape[0], NUM_BLOCKS, NUM_KV_HEADS, 2,
+                                                            BLOCK_LEN, 2).float()
+
+    def match(src, codes_gathered, kv_idx):
+        src = src.float().reshape(BATCH, src.shape[1], NUM_KV_HEADS, HEAD_DIM)
+        tlen = src.shape[1]
+        scale = params_all[0, :, :, kv_idx, :, 0]  # (nb, H, S)
+        mn = params_all[0, :, :, kv_idx, :, 1]
+        off = _block_offsets().long()
+        pos = torch.arange(tlen, device=src.device)
+        blk = off[:, pos // BLOCK_LEN]
+        sl = pos % BLOCK_LEN
+        scale_seq = scale[blk, :, sl]  # (B, T, H)
+        mn_seq = mn[blk, :, sl]
+        # Mirror ConvertKvCache: bf16 arithmetic end to end, rint rounding
+        # (TM fused write). The ATen writer quantizes in fp32 under the
+        # (scale, min) contract; accept either convention's byte match.
+        tmp_bf16 = (src.bfloat16() - mn_seq.bfloat16().unsqueeze(-1)) * \
+            (1.0 / scale_seq).bfloat16().unsqueeze(-1)
+        want_bf16 = torch.round(tmp_bf16.float()).clamp_(0, 255)
+        want_fp32 = torch.round((src - mn_seq.unsqueeze(-1).float()) /
+                                scale_seq.unsqueeze(-1).float()).clamp_(0, 255)
+        got = codes_gathered[:, :tlen].float()
+        match_bf16 = (got == want_bf16).float().mean().item()
+        match_fp32 = (got == want_fp32).float().mean().item()
+        # The ATen writer quantizes in fp32 before the bf16 param cast, so a
+        # handful of boundary codes differ by one step after the cast; exact
+        # placement still forbids any cross-wiring.
+        near = (got - want_fp32).abs() <= 1.0
+        match_near = near.float().mean().item()
+        return max(match_bf16, match_fp32, match_near)
+
+    match_k = match(k_src, got_k, 0)
+    match_v = match(v_src, got_v, 1)
+    assert match_k >= floor, f'{label}: K placement match {match_k:.4f} below {floor}'
+    assert match_v >= floor, f'{label}: V placement match {match_v:.4f} below {floor}'
+    print(f'{label}: K/V placement match {match_k:.4f}/{match_v:.4f}')
+    return min(match_k, match_v)
+
+
+def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0, batch=BATCH, q_lens=None):
+    """One TM write-kernel append of new tokens.
+
+    `k_slice`/`v_slice` must be the per-batch truncated slices packed in
+    batch order (batch b occupies rows [sum(q_lens[:b]), sum(q_lens[:b+1]))):
+    the kernel reads batch b's tokens at row offsets from cu_q_len, so
+    feeding unpadded (B, KLEN, ...) rows silently cross-wires every batch
+    past the first (the historical false-green class).
+    """
     from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
     from lmdeploy.turbomind import _tm
 
+    if q_lens is None:
+        q_len = k_slice.shape[0] // batch
+        q_lens = [q_len] * batch
     k_cache, v_cache, k_sz, v_sz = _layer_views(pool, layer)
     pool_base, block_bytes, _, num_kv_heads, head_dim = (
         k_cache.data_ptr(), k_cache.stride(0), k_cache.shape[1], k_cache.shape[2], k_cache.shape[3])
     ptrs, cu_block_base = tm_block_pointer_table(_block_offsets(), pool_base, block_bytes)
-    num_tokens = k_slice.shape[0]
-    q_len = num_tokens // batch
-    cu_q = _cu([q_len] * batch)
+    cu_q = _cu(q_lens)
     cu_k = _cu(kv_seqlens)
     _tm.tm_process_kv(
         _tm.from_dlpack(k_slice.contiguous()),
         _tm.from_dlpack(v_slice.contiguous()),
         ptrs.data_ptr(), cu_q.data_ptr(), cu_k.data_ptr(), cu_block_base.data_ptr(),
         stride_c=num_kv_heads, stride_s=num_kv_heads, stride_h=1,
-        max_q_len=q_len, num_kv_heads=num_kv_heads, head_dim=head_dim,
+        max_q_len=max(q_lens), num_kv_heads=num_kv_heads, head_dim=head_dim,
         batch_size=batch, block_len=BLOCK_LEN, kv_quant=8,
         stream_ptr=torch.cuda.current_stream().cuda_stream)
+
+
+def _packed_rows(t, lens):
+    """Per-batch truncated slices packed in batch order: (sum(lens), H, D)."""
+    return torch.cat([t[b, :ln] for b, ln in enumerate(lens)]).contiguous()
 
 
 def _tm_decode(q, pool, klen, k_last, v_last, layer=0):
@@ -236,7 +313,8 @@ def test_bridge_write_and_tm_decode_matches_reference():
     q, _, _ = _make_data(seed=3)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
     pool_t = pool.pools[0].tensor
-    _bridge_fill(k.reshape(-1, NUM_KV_HEADS, HEAD_DIM), v.reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+    _bridge_fill(k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
                  [PREFILL_LEN] * BATCH, pool)
     torch.cuda.synchronize()
 
@@ -244,7 +322,21 @@ def test_bridge_write_and_tm_decode_matches_reference():
     ref = _reference(q, k, v, PREFILL_LEN)
     max_abs, kl, argmatch = _assert_gate(out, ref, 'tm-decode/prefill')
 
+    # Pool-vs-source gate: every prefilled slot dequantizes to its bf16
+    # source within the int8 budget, and nothing beyond the append range was
+    # touched. Reader-side tolerances cannot localize a misplaced token; the
+    # pool content can (the historical false green: code match 0.67% under a
+    # passing decode gate).
     kq, vq = _dequant_pool(pool_t)
+    kt = k.float().reshape(BATCH, KLEN, NUM_KV_HEADS, HEAD_DIM)
+    vt = v.float().reshape(BATCH, KLEN, NUM_KV_HEADS, HEAD_DIM)
+    kerr = (kq[:, :PREFILL_LEN] - kt[:, :PREFILL_LEN]).abs().max().item()
+    verr = (vq[:, :PREFILL_LEN] - vt[:, :PREFILL_LEN]).abs().max().item()
+    assert kerr <= 0.05, f'tm-writer K pool-vs-source error {kerr:.4f} exceeds 0.05'
+    assert verr <= 0.05, f'tm-writer V pool-vs-source error {verr:.4f} exceeds 0.05'
+    assert kq[:, PREFILL_LEN:].abs().max().item() == 0.0, 'tm-writer wrote past the append range'
+    _assert_code_match(pool_t, k[:, :PREFILL_LEN], v[:, :PREFILL_LEN], 'tm-writer/codes')
+
     ref_q = _reference(q, kq, vq, PREFILL_LEN)
     diff_q = (out.float() - ref_q).abs().max().item()
     print(f'\ntm-decode/prefill: max_abs={max_abs:.4f} KL={kl:.3e} argmatch={argmatch:.4f} '
@@ -257,7 +349,8 @@ def test_pt_reader_on_tm_pool():
     _, k, v = _make_data()
     q, _, _ = _make_data(seed=5)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
-    _bridge_fill(k.reshape(-1, NUM_KV_HEADS, HEAD_DIM), v.reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+    _bridge_fill(k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
                  [PREFILL_LEN] * BATCH, pool)
     torch.cuda.synchronize()
 
@@ -628,7 +721,7 @@ class _GraphDecodeCase:
         # simulated runner seqlen buffer; the binding reads them on device.
         self.cu_q[1:].copy_(torch.arange(1, BATCH + 1, dtype=torch.int32, device='cuda'))
         self.cu_q[0].zero_()
-        self.cu_k[1:].copy_(torch.cumsum(self.kv_seqlens_buf, 0))
+        self.cu_k[1:].copy_(torch.cumsum(self.kv_seqlens_buf, 0, dtype=torch.int32))
         self.cu_k[0].zero_()
         self.tm.tm_attn_decode_graph(
             self.tm.from_dlpack(self.q_b),
@@ -807,9 +900,7 @@ def test_eager_decode_unequal_lengths_and_pool_tail():
     q, _, _ = _make_data(seed=13)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
     pool_t = pool.pools[0].tensor
-    _bridge_fill(k[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
-                 v[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
-                 lens, pool)
+    _bridge_fill(_packed_rows(k, lens), _packed_rows(v, lens), lens, pool, q_lens=lens)
     torch.cuda.synchronize()
 
     k_cache = _layer_views(pool, 0)[0]
@@ -817,6 +908,17 @@ def test_eager_decode_unequal_lengths_and_pool_tail():
     cu_q = _cu([1] * BATCH).int()
     cu_k = _cu(lens).int()
     tail_snapshot = pool_t.clone()
+
+    # Liveness probe: poison every sequence's own last slot (the only slot
+    # the decode re-store touches). A correct pool would make the re-store
+    # byte-idempotent and indistinguishable from a no-op, so the probe needs
+    # poisoned bytes to overwrite.
+    h2sd = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
+    for b, ln in enumerate(lens):
+        blk = int(_block_offsets()[b, (ln - 1) // BLOCK_LEN])
+        slot = (ln - 1) % BLOCK_LEN
+        pool_t[0, blk, :h2sd].view(NUM_KV_HEADS, 2, BLOCK_LEN, -1)[:, :, slot].fill_(0xCC)
+        pool_t[0, blk, h2sd:].view(torch.bfloat16).view(NUM_KV_HEADS, 2, BLOCK_LEN, -1)[:, :, slot] = 0xCC
 
     k_last = k[torch.arange(BATCH), torch.tensor(lens) - 1]
     v_last = v[torch.arange(BATCH), torch.tensor(lens) - 1]
@@ -857,7 +959,20 @@ def test_eager_decode_unequal_lengths_and_pool_tail():
                     and torch.equal(pb[codes:].view(torch.bfloat16).view(NUM_KV_HEADS, 2, BLOCK_LEN, 2)[:, :, keep],
                                     sb[codes:].view(torch.bfloat16).view(NUM_KV_HEADS, 2, BLOCK_LEN, 2)[:, :, keep]), \
                     f'seq {b}: block {j}: slots beyond ti = {ln - 1} were polluted'
-    assert (pool_b != snap_b).any().item(), 're-store of the own last slot must be live'
+    # The poisoned own slots must be gone and the slot dequantize to the
+    # step's own K/V rows (the re-store re-quantizes under the stored params,
+    # so byte-level comparison against the prefill write is over-strict).
+    for b, ln in enumerate(lens):
+        blk = int(_block_offsets()[b, (ln - 1) // BLOCK_LEN])
+        slot = (ln - 1) % BLOCK_LEN
+        for src_row, kv_idx in ((k_last[b], 0), (v_last[b], 1)):
+            codes_reg = pool_b[blk, :h2sd].view(NUM_KV_HEADS, 2, BLOCK_LEN, HEAD_DIM)[:, :, slot]
+            params_reg = pool_b[blk, h2sd:].view(torch.bfloat16).view(NUM_KV_HEADS, 2, BLOCK_LEN, 2)[:, :, slot]
+            assert not (codes_reg == 0xCC).all().item(), f'seq {b}: poison survived the re-store'
+            deq = (codes_reg[:, kv_idx].float() * params_reg[:, kv_idx, 0:1].float() +
+                   params_reg[:, kv_idx, 1:2].float())
+            err = (deq - src_row.float()).abs().max().item()
+            assert err <= 0.05, f'seq {b}: own last slot dequant error {err:.4f} after re-store'
 
 
 def test_eager_tm_decode_impl_path_unequal_lengths():
@@ -870,9 +985,7 @@ def test_eager_tm_decode_impl_path_unequal_lengths():
     _, k, v = _make_data()
     q, _, _ = _make_data(seed=17)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
-    _bridge_fill(k[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
-                 v[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
-                 lens, pool)
+    _bridge_fill(_packed_rows(k, lens), _packed_rows(v, lens), lens, pool, q_lens=lens)
     torch.cuda.synchronize()
 
     impl = TmInt8KVAttentionImpl(NUM_HEADS, HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
@@ -942,9 +1055,9 @@ def test_graph_state_two_shapes_and_reset():
             st = impl._graph_state(batch, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, device, 2)
             cu_q, cu_k, ws = st['cu_q_len'], st['cu_k_len'], st['workspace']
             cu_q[0].zero_()
-            cu_q[1:].copy_(torch.cumsum(torch.ones(batch, dtype=torch.int32, device='cuda'), 0))
+            cu_q[1:].copy_(torch.cumsum(torch.ones(batch, dtype=torch.int32, device='cuda'), 0, dtype=torch.int32))
             cu_k[0].zero_()
-            cu_k[1:].copy_(torch.cumsum(kv_buf, 0))
+            cu_k[1:].copy_(torch.cumsum(kv_buf, 0, dtype=torch.int32))
             _tm.tm_attn_decode_graph(
                 _tm.from_dlpack(q_b), _tm.from_dlpack(k_b), _tm.from_dlpack(v_b), _tm.from_dlpack(out_b),
                 ptrs.data_ptr(), cu_block_nums.data_ptr(), cu_q.data_ptr(), cu_k.data_ptr(), ws.data_ptr(),
@@ -1017,3 +1130,201 @@ def test_graph_state_two_shapes_and_reset():
     # Reset releases every entry.
     impl.reset_tm_graph_state()
     assert not impl._tm_graph_states
+
+
+# ---------------------------------------------------------------------------
+# B3-07: TM fused write path (default) vs ATen writer (fallback) vs triton
+# INT8 fill — three writers, one pool geometry, two readers.
+# ---------------------------------------------------------------------------
+
+
+def test_write_path_knob_and_fallback_routing(monkeypatch):
+    """The knob stays the single opt-in for the fused write; non-qualifying
+    dtypes and a missing native module fall back to the ATen writer."""
+    from lmdeploy.pytorch.backends.cuda.attention.int8_kv import TmInt8KVAttentionImpl
+
+    impl = TmInt8KVAttentionImpl(NUM_HEADS, HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
+    key = torch.zeros(4, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+
+    monkeypatch.setenv('LMDEPLOY_TM_ATTN_INT8_KV', 'off')
+    assert not impl._can_tm_write(key), 'knob off must not take the fused write'
+    monkeypatch.setenv('LMDEPLOY_TM_ATTN_INT8_KV', 'on')
+    assert impl._can_tm_write(key) == (impl._tm_module() is not None)
+    monkeypatch.setenv('LMDEPLOY_TM_ATTN_INT8_KV', 'auto')
+    assert impl._can_tm_write(key) == (impl._tm_module() is not None)
+
+    # fp32 rows do not qualify: the binding takes bf16/fp16 only.
+    monkeypatch.setenv('LMDEPLOY_TM_ATTN_INT8_KV', 'on')
+    assert not impl._can_tm_write(key.float()), 'fp32 rows must fall back to the ATen writer'
+
+
+def test_write_paths_three_way_same_pool():
+    """S1 three-way regression: TM fused write, ATen convert+scatter writer,
+    and the triton INT8 fill (PT caches + zero->min transcription) fill the
+    same pool geometry for one prefill plus per-token decode appends; every
+    pool dequantizes to the bf16 source, the three pools agree pairwise, and
+    both readers (TM decode, PT triton) stay inside the batch-1 budgets
+    (max_abs 0.25 / KL 1e-2 / code match 0.99) on every pool."""
+    from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm, tm_process_kv_fill
+    from lmdeploy.pytorch.kernels.cuda.fill_kv_cache import fill_kv_cache as triton_fill
+
+    _, k, v = _make_data()
+    q, _, _ = _make_data(seed=19)
+    steps = 8
+    full = PREFILL_LEN + steps
+
+    def metadata(q_lens, kv_lens, max_q):
+        ql = torch.tensor(q_lens, dtype=torch.long, device='cuda')
+        kl = torch.tensor(kv_lens, dtype=torch.long, device='cuda')
+        return SimpleNamespace(quant_policy=QuantPolicy.INT8,
+                               q_seqlens=ql,
+                               kv_seqlens=kl,
+                               q_start_loc=torch.nn.functional.pad(torch.cumsum(ql, 0), (1, 0))[:-1],
+                               block_offsets=_block_offsets(),
+                               max_q_seqlen=max_q)
+
+    pools = {}
+    allocs = {}
+    views = {}
+    for name in ('tm', 'aten', 'triton'):
+        alloc = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+        pools[name] = alloc.pools[0].tensor
+        allocs[name] = alloc
+        views[name] = _layer_views(alloc, 0)
+
+    # Triton INT8 fill works on its own PT-contract caches (scale, zero).
+    pt_kc = torch.zeros(NUM_BLOCKS, BLOCK_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.uint8, device='cuda')
+    pt_vc = torch.zeros_like(pt_kc)
+    pt_ksz = torch.zeros(NUM_BLOCKS, BLOCK_LEN, NUM_KV_HEADS, 2, dtype=torch.float32, device='cuda')
+    pt_vsz = torch.zeros_like(pt_ksz)
+
+    def append(name, kr, vr, kv_lens, max_q):
+        ql = [kr.shape[0] // BATCH] * BATCH
+        meta = metadata(ql, kv_lens, max_q)
+        kc, vc, ksz, vsz = views[name]
+        if name == 'tm':
+            tm_process_kv_fill(kr, vr, kc, vc, meta.q_seqlens, meta.kv_seqlens,
+                               _block_offsets(), max_q_len=max_q)
+        elif name == 'aten':
+            fill_kv_cache_tm(kr, vr, kc, vc, ksz, vsz, meta.q_start_loc,
+                             meta.q_seqlens, meta.kv_seqlens, _block_offsets())
+        else:
+            triton_fill(kr, vr, pt_kc, pt_vc, meta.q_start_loc, meta.q_seqlens,
+                        meta.kv_seqlens, max_q, _block_offsets(),
+                        k_scales_zeros=pt_ksz, v_scales_zeros=pt_vsz,
+                        quant_policy=QuantPolicy.INT8, kv_layout='bshd')
+
+    append('tm', k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+           v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM), [PREFILL_LEN] * BATCH, PREFILL_LEN)
+    append('aten', k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+           v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM), [PREFILL_LEN] * BATCH, PREFILL_LEN)
+    append('triton', k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+           v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM), [PREFILL_LEN] * BATCH, PREFILL_LEN)
+    for step in range(steps):
+        kv_now = PREFILL_LEN + step + 1
+        kr = k[:, PREFILL_LEN + step]
+        vr = v[:, PREFILL_LEN + step]
+        append('tm', kr, vr, [kv_now] * BATCH, 1)
+        append('aten', kr, vr, [kv_now] * BATCH, 1)
+        append('triton', kr, vr, [kv_now] * BATCH, 1)
+    torch.cuda.synchronize()
+
+    # Transcribe the triton PT caches (scale, zero) into the TM pool contract
+    # (scale, min): min = -scale * zero; codes are shared as written.
+    kc, vc, ksz, vsz = views['triton']
+    kc.copy_(pt_kc)
+    vc.copy_(pt_vc)
+    ksz[..., 0].copy_(pt_ksz[..., 0])
+    ksz[..., 1].copy_(-pt_ksz[..., 0] * pt_ksz[..., 1])
+    vsz[..., 0].copy_(pt_vsz[..., 0])
+    vsz[..., 1].copy_(-pt_vsz[..., 0] * pt_vsz[..., 1])
+    torch.cuda.synchronize()
+
+    # Every pool dequantizes to its bf16 source within the int8 budget.
+    deq = {}
+    for name in pools:
+        deq[name] = _dequant_pool(pools[name], layer=0)
+    src_k = k.float().reshape(BATCH, KLEN, NUM_KV_HEADS, HEAD_DIM)
+    src_v = v.float().reshape(BATCH, KLEN, NUM_KV_HEADS, HEAD_DIM)
+    for name, (kq, vq) in deq.items():
+        kerr = (kq[:, :full] - src_k[:, :full]).abs().max().item()
+        verr = (vq[:, :full] - src_v[:, :full]).abs().max().item()
+        assert kerr <= 0.05, f'{name}-writer K pool-vs-source error {kerr:.4f}'
+        assert verr <= 0.05, f'{name}-writer V pool-vs-source error {verr:.4f}'
+        if name != 'triton':
+            _assert_code_match(pools[name], k[:, :full], v[:, :full], f'{name}-writer/codes')
+
+    # Pairwise writer agreement: the three pools carry the same codes.
+    names = list(deq)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            ka, va = deq[names[i]]
+            kb, vb = deq[names[j]]
+            d = max((ka[:, :full] - kb[:, :full]).abs().max().item(),
+                    (va[:, :full] - vb[:, :full]).abs().max().item())
+            assert d <= 0.05, f'{names[i]} vs {names[j]} pools diverge: {d:.4f}'
+            print(f'\nthree-way {names[i]} vs {names[j]}: max_abs={d:.5f}')
+
+    # Both readers stay inside the batch-1 budgets on every pool, and the
+    # readers agree with each other.
+    for name in pools:
+        out_tm = _tm_decode(q, allocs[name], full, k[:, full - 1], v[:, full - 1])
+        out_pt = _pt_decode(q, allocs[name], full)
+        ref = _reference(q, k, v, full)
+        _assert_gate(out_tm, ref, f'tm-reader/{name}-writer')
+        _assert_gate(out_pt, ref, f'pt-reader/{name}-writer')
+        cross = (out_tm.float() - out_pt.float()).abs().max().item()
+        assert cross <= 0.25, f'{name}-writer: readers diverge {cross:.4f}'
+        print(f'three-way {name}-writer: tm-vs-pt={cross:.4f}')
+
+
+def test_tm_write_fill_is_capture_safe():
+    """The TM fused write must capture cleanly (no boolean host sync, stable
+    grid from metadata max_q_seqlen) and replay with per-step content: the
+    captured fill places bytes exactly like an eager fill of the same rows."""
+    from lmdeploy.pytorch.backends.cuda.attention.int8_kv import TmInt8KVAttentionImpl
+
+    impl = TmInt8KVAttentionImpl(NUM_HEADS, HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
+    if impl._tm_module() is None:
+        pytest.skip('native TM module unavailable')
+
+    _, k, v = _make_data()
+    q_lens = [PREFILL_LEN] * BATCH
+
+    def metadata(max_q):
+        ql = torch.tensor(q_lens, dtype=torch.long, device='cuda')
+        return SimpleNamespace(quant_policy=QuantPolicy.INT8,
+                               q_seqlens=ql,
+                               kv_seqlens=ql,
+                               q_start_loc=torch.nn.functional.pad(torch.cumsum(ql, 0), (1, 0))[:-1],
+                               block_offsets=_block_offsets(),
+                               max_q_seqlen=max_q)
+
+    kr = k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    vr = v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    meta = metadata(PREFILL_LEN)  # host-side construction must stay out of capture
+
+    def fill(views):
+        impl._fill_kv_cache_impl(kr, vr, views[0], views[1], meta,
+                                 max_q_seqlen=PREFILL_LEN,
+                                 k_scales_zeros=views[2], v_scales_zeros=views[3])
+
+    pool_ref = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    fill(_layer_views(pool_ref, 0))
+
+    pool_cap = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    views = _layer_views(pool_cap, 0)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        fill(views)  # warmup outside capture
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        fill(views)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(pool_cap.pools[0].tensor, pool_ref.pools[0].tensor), \
+        'captured TM fill diverges from the eager fill'
+    _assert_code_match(pool_cap.pools[0].tensor, k[:, :PREFILL_LEN], v[:, :PREFILL_LEN], 'captured-tm-writer/codes')

@@ -19,14 +19,20 @@ K outside attention); decode steps dispatch the TM decode kernel
 - non-INT8 runtime quant policies behave exactly like `TritonAttentionImpl`
   (the pool then uses the default layout, matched by the same opt-in
   decision that built this impl).
+
+The KV write defaults to the TM fused write kernel (`_tm.tm_process_kv`
+via `tm_kv.tm_process_kv_fill`): quantize plus block write in one launch,
+for both prefill appends and one-token decode appends. The ATen
+convert+scatter writer (`tm_kv.fill_kv_cache_tm`) stays as the fallback
+for non-qualifying shapes (non-bf16/fp16 rows) or a missing native module.
 """
-import os
 
 import torch
 
 from lmdeploy.messages import QuantPolicy
 from lmdeploy.utils import get_logger
 
+from ...tm_kv import tm_int8_kv_knob
 from .default import TritonAttentionImpl, TritonAttentionMetadata
 
 logger = get_logger('lmdeploy')
@@ -86,39 +92,30 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
 
         if k_scales_zeros is None or v_scales_zeros is None:
             raise RuntimeError('TM int8 pool fill requires the quant scale views.')
-        from ...tm_kv import fill_kv_cache_tm
+        from ...tm_kv import fill_kv_cache_tm, tm_process_kv_fill
 
-        # Default: the triton-free ATen convert+scatter writer. The TM write
-        # kernel (`_tm.tm_process_kv`) stays available under
-        # LMDEPLOY_TM_ATTN_INT8_BRIDGE=1; a q_len=1 illegal access in that
-        # path is still under investigation, so correctness ships first.
-        if os.getenv('LMDEPLOY_TM_ATTN_INT8_BRIDGE', '0') == '1' and self._tm_module() is not None:
-            _, _, block_len, num_kv_heads, head_dim = self._pool_geometry(k_cache)
-            num_seqs = attn_metadata.kv_seqlens.shape[0]
-            cu_q = torch.nn.functional.pad(torch.cumsum(attn_metadata.q_seqlens, 0, dtype=torch.int32), (1, 0))
-            cu_k = torch.nn.functional.pad(torch.cumsum(attn_metadata.kv_seqlens, 0, dtype=torch.int32), (1, 0))
-            ptrs, cu_block_base = self._pointer_tables(k_cache, attn_metadata)
-            stride_rows = key.stride(0) // head_dim
-            stride_head = key.stride(1) // head_dim
-            max_q = attn_metadata.max_q_seqlen or (key.shape[0] + num_seqs - 1) // num_seqs
-            self._tm.tm_process_kv(
-                self._wrap(key.contiguous()),
-                self._wrap(value.contiguous()),
-                ptrs.data_ptr(),
-                cu_q.data_ptr(),
-                cu_k.data_ptr(),
-                cu_block_base.data_ptr(),
-                stride_c=stride_rows,
-                stride_s=stride_rows,
-                stride_h=stride_head,
-                max_q_len=max_q,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                batch_size=num_seqs,
-                block_len=block_len,
-                kv_quant=8,
-                stream_ptr=torch.cuda.current_stream(key.device).cuda_stream,
-            )
+        # Default: the TM fused write kernel — quantize and block write in one
+        # launch (measured 2.8-5.9x over the ATen writer on decode appends,
+        # 2.1-4.1x on prefill; benchmark/bench_tm_write.py). The historical
+        # q_len=1 illegal access was a harness defect (int64 cumsum promotion
+        # feeding a `const int*` binding), not a kernel defect; `int8_kv` and
+        # `tm_kv` build cumulative lengths int32 end to end. The ATen
+        # convert+scatter writer stays as the fallback for non-qualifying
+        # shapes or a missing native module.
+        if self._can_tm_write(key):
+            max_q = attn_metadata.max_q_seqlen
+            if not max_q:
+                # Grid bound without a host sync: total new tokens cover any
+                # ragged per-sequence count; the kernel masks against cu_q_len.
+                max_q = max(key.shape[0], 1)
+            tm_process_kv_fill(key,
+                               value,
+                               k_cache,
+                               v_cache,
+                               attn_metadata.q_seqlens,
+                               attn_metadata.kv_seqlens,
+                               attn_metadata.block_offsets,
+                               max_q_len=max_q)
             return
 
         fill_kv_cache_tm(key,
@@ -131,6 +128,18 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
                          attn_metadata.q_seqlens,
                          attn_metadata.kv_seqlens,
                          attn_metadata.block_offsets)
+
+    def _can_tm_write(self, key: torch.Tensor) -> bool:
+        """Whether this append qualifies for the TM fused write kernel.
+
+        The knob stays the single opt-in (`LMDEPLOY_TM_ATTN_INT8_KV` on/auto:
+        write and read share the TM path); the kernel binds bf16/fp16 only.
+        """
+        if tm_int8_kv_knob() == 'off':
+            return False
+        if self._tm_module() is None:
+            return False
+        return key.dtype in (torch.bfloat16, torch.float16)
 
     def _wrap(self, tensor: torch.Tensor):
         """DLPack-wrap a torch tensor for the TurboMind bindings."""
@@ -206,9 +215,9 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
 
         # Device-side cumulative lengths from the (runner-filled) metadata
         # buffers; captured as ops, re-executed on every replay.
-        gs['cu_q_len'][1:].copy_(torch.cumsum(attn_metadata.q_seqlens.to(torch.int32), 0))
+        gs['cu_q_len'][1:].copy_(torch.cumsum(attn_metadata.q_seqlens.to(torch.int32), 0, dtype=torch.int32))
         gs['cu_q_len'][0].zero_()
-        gs['cu_k_len'][1:].copy_(torch.cumsum(attn_metadata.kv_seqlens.to(torch.int32), 0))
+        gs['cu_k_len'][1:].copy_(torch.cumsum(attn_metadata.kv_seqlens.to(torch.int32), 0, dtype=torch.int32))
         gs['cu_k_len'][0].zero_()
 
         # Capacity bound frozen at capture: grid/split schedule derives from
@@ -284,8 +293,8 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         # ti = max_k_len - 1 beyond the true last slot (pool-tail pollution).
         cu_q_len = torch.zeros(num_seqs + 1, dtype=torch.int32, device=query.device)
         cu_k_len = torch.zeros(num_seqs + 1, dtype=torch.int32, device=query.device)
-        cu_q_len[1:].copy_(torch.cumsum(attn_metadata.q_seqlens.to(torch.int32), 0))
-        cu_k_len[1:].copy_(torch.cumsum(attn_metadata.kv_seqlens.to(torch.int32), 0))
+        cu_q_len[1:].copy_(torch.cumsum(attn_metadata.q_seqlens.to(torch.int32), 0, dtype=torch.int32))
+        cu_k_len[1:].copy_(torch.cumsum(attn_metadata.kv_seqlens.to(torch.int32), 0, dtype=torch.int32))
         tm.tm_attn_decode(
             self._wrap(q),
             self._wrap(k_rows),

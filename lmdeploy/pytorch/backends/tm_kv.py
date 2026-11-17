@@ -352,6 +352,77 @@ def fill_kv_cache_tm(key: torch.Tensor,
         params[block_ids, token_in_block] = torch.where(keep, param_pair, old_params)
 
 
+def tm_process_kv_fill(key: torch.Tensor,
+                       value: torch.Tensor,
+                       k_cache: torch.Tensor,
+                       v_cache: torch.Tensor,
+                       q_seqlens: torch.Tensor,
+                       kv_seqlens: torch.Tensor,
+                       block_offsets: torch.Tensor,
+                       max_q_len: int) -> None:
+    """Append key/value tokens through the TM fused write kernel.
+
+    One launch quantizes per token per head and writes codes plus (scale,
+    min) params straight into the TM block pool (`invokeProcessKV_v2`, null
+    rope: the model pre-rotates K outside attention). Placement matches
+    `fill_kv_cache_tm`: batch b's tokens land at positions
+    [kv_seqlens[b] - q_seqlens[b], kv_seqlens[b]) inside `block_offsets[b]`.
+
+    Args:
+        key: New tokens, (sum_q, Hkv, D) packed token-major; head-dim must be
+            contiguous (batch strides derive from cu_q_len on device).
+        value: New tokens, (sum_q, Hkv, D).
+        k_cache: K codes view (num_blocks, S, Hkv, D); supplies the pool base.
+        v_cache: Unused (the kernel writes K and V in one pass); kept for
+            signature parity with `fill_kv_cache_tm`.
+        q_seqlens: New token counts, (B,).
+        kv_seqlens: Total lengths after the append, (B,).
+        block_offsets: Physical block ids per sequence, (B, max_blocks).
+        max_q_len: Grid bound over per-sequence new-token counts; must be at
+            least the true maximum (the kernel masks against cu_q_len).
+    """
+    from lmdeploy.turbomind import _tm
+
+    block_len, num_kv_heads, head_dim = k_cache.shape[-3:]
+    device = key.device
+    if key.dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError(f'tm_process_kv_fill requires bf16/fp16 keys, got {key.dtype}')
+    if key.stride(2) != 1 or value.stride(2) != 1:
+        raise ValueError('tm_process_kv_fill requires contiguous head dim')
+
+    # Cumulative lengths stay int32 end to end: torch.cumsum promotes int32
+    # input to int64 unless the dtype is pinned, and the binding reads
+    # `const int*` — an int64 array interleaves garbage and writes out of
+    # bounds (B3-07 root cause of the historical q_len=1 illegal access).
+    num_seqs = q_seqlens.shape[0]
+    cu_q = torch.zeros(num_seqs + 1, dtype=torch.int32, device=device)
+    cu_k = torch.zeros(num_seqs + 1, dtype=torch.int32, device=device)
+    cu_q[1:] = torch.cumsum(q_seqlens.to(device, torch.int32), 0, dtype=torch.int32)
+    cu_k[1:] = torch.cumsum(kv_seqlens.to(device, torch.int32), 0, dtype=torch.int32)
+
+    ptrs, cu_block_base = tm_block_pointer_table(block_offsets, k_cache.data_ptr(), k_cache.stride(0))
+    stride_s = key.stride(0) // head_dim
+    stride_h = key.stride(1) // head_dim
+    _tm.tm_process_kv(
+        _tm.from_dlpack(key),
+        _tm.from_dlpack(value),
+        ptrs.data_ptr(),
+        cu_q.data_ptr(),
+        cu_k.data_ptr(),
+        cu_block_base.data_ptr(),
+        stride_c=stride_s,
+        stride_s=stride_s,
+        stride_h=stride_h,
+        max_q_len=max_q_len,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        batch_size=num_seqs,
+        block_len=block_len,
+        kv_quant=8,
+        stream_ptr=torch.cuda.current_stream(device).cuda_stream,
+    )
+
+
 def tm_min_to_zero(sz: torch.Tensor) -> torch.Tensor:
     """Convert (scale, min) param slots to the PT (scale, zero) convention.
 

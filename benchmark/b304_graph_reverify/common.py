@@ -50,8 +50,10 @@ def block_offsets():
 
 
 def cu(vals):
+    # torch.cumsum promotes int32 to int64 unless pinned; the TM bindings
+    # read `const int*` and an int64 array interleaves garbage (B3-07).
     return torch.nn.functional.pad(
-        torch.cumsum(torch.tensor(vals, dtype=torch.int32), 0), (1, 0)).cuda()
+        torch.cumsum(torch.tensor(vals, dtype=torch.int32), 0, dtype=torch.int32), (1, 0)).cuda()
 
 
 def make_qkv(seed, klen):
