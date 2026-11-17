@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from lmdeploy.pytorch.backends import get_backend
+from lmdeploy.utils import get_logger
 
 from ...config import CacheConfig, ModelConfig
 from .layout import BlockCacheLayout, CacheAllocation
@@ -17,6 +18,8 @@ from .schema import (
     CacheTensorSpec,
     build_model_block_cache_tensor_specs,
 )
+
+logger = get_logger('lmdeploy')
 
 
 @dataclass(frozen=True)
@@ -101,8 +104,16 @@ def build_block_cache_plan(
                                                         cache_config,
                                                         world_size,
                                                         block_requests=block_requests)
-    layout = get_backend().get_cache_backend().build_block_layout(tensor_specs,
-                                                                  num_layers=model_config.num_layers)
+    cache_backend = get_backend().get_cache_backend()
+    layout = cache_backend.build_block_layout(tensor_specs, num_layers=model_config.num_layers)
+    # Lazy import: backends.tm_kv depends on this package's layout classes.
+    from lmdeploy.pytorch.backends.tm_kv import build_tm_int8_block_layout, tm_int8_kv_layout_requested
+
+    if tm_int8_kv_layout_requested(model_config, cache_config):
+        logger.debug('TM int8-KV block layout enabled (quant_policy=INT8, opt-in knob active).')
+        layout = build_tm_int8_block_layout(tensor_specs,
+                                            num_layers=model_config.num_layers,
+                                            default_builder=cache_backend.build_block_layout)
     return BlockCachePlan(
         tensor_specs=tensor_specs,
         layout=layout,

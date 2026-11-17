@@ -5,6 +5,11 @@ import torch
 
 from lmdeploy.pytorch import envs as _envs
 from lmdeploy.pytorch.backends.attention import PagedAttentionBuildSpec
+from lmdeploy.pytorch.backends.tm_kv import (
+    record_tm_int8_kv_capability,
+    tm_int8_kv_knob,
+    turbomind_int8_kv_attention_reason,
+)
 from lmdeploy.utils import get_logger
 
 from .default import TritonAttentionImpl
@@ -68,6 +73,35 @@ def _enable_fa3(alibi: bool, learnable_sink: bool, block_sparse_size: int, head_
     return enable
 
 
+def _build_tm_int8_kv_attention(spec: PagedAttentionBuildSpec, common_args: dict):
+    """Build the TM int8-KV paged attention, or None to keep the stock impl.
+
+    The verdict is recorded for the cache plan (model builds run before cache
+    plans). `on` turns probe failures into a hard error; `auto` falls back.
+    MLA layers never consume the standard KV pool, so they stay neutral
+    (no verdict recorded) and cannot disable the layout for sibling layers.
+    """
+    if spec.use_flash_mla:
+        return None
+
+    knob = tm_int8_kv_knob()
+    if knob == 'off':
+        return None
+
+    reason = turbomind_int8_kv_attention_reason(spec, sliding_window=_normalize_sliding_window(spec.sliding_window))
+    if reason is not None:
+        if knob == 'on':
+            raise RuntimeError(f'TM int8-KV attention is forced on but unavailable: {reason}')
+        record_tm_int8_kv_capability(False)
+        logger.debug(f'TM int8-KV attention unavailable, falling back: {reason}')
+        return None
+
+    record_tm_int8_kv_capability(True)
+    logger.debug('Build TmInt8KVAttentionImpl Attention')
+    from .int8_kv import TmInt8KVAttentionImpl
+    return TmInt8KVAttentionImpl(block_sparse_size=spec.block_sparse_size, **common_args)
+
+
 def _normalize_sliding_window(sliding_window):
     """Normalize sliding window to tuple format.
 
@@ -88,9 +122,10 @@ def _build_paged_attention(spec: PagedAttentionBuildSpec) -> TritonAttentionImpl
     """Build the selected CUDA paged-attention implementation.
 
     Selection order:
-    1. use_flash_mla: Use dense or sparse FlashMLA for MLA models
-    2. enable_fa3: Use FA3Impl if FA3 is available and supported
-    3. Default: Use TritonAttentionImpl as fallback
+    1. tm_int8_kv: TM decode + TM int8 pool when the opt-in probe passes
+    2. use_flash_mla: Use dense or sparse FlashMLA for MLA models
+    3. enable_fa3: Use FA3Impl if FA3 is available and supported
+    4. Default: Use TritonAttentionImpl as fallback
     """
     sliding_window = _normalize_sliding_window(spec.sliding_window)
     common_args = dict(
@@ -104,6 +139,11 @@ def _build_paged_attention(spec: PagedAttentionBuildSpec) -> TritonAttentionImpl
         logit_softcapping=spec.logit_softcapping,
         causal=spec.causal,
     )
+
+    tm_impl = _build_tm_int8_kv_attention(spec, common_args)
+    if tm_impl is not None:
+        return tm_impl
+
     enable_fa3 = _enable_fa3(spec.alibi, spec.learnable_sink, spec.block_sparse_size, spec.head_dim)
 
     if spec.use_flash_mla is True:
