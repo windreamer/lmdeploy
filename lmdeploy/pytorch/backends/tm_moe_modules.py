@@ -51,8 +51,7 @@ class FusedMoETmW4A16Impl(ABC):
 
 @dataclass(frozen=True)
 class FusedMoETmW4A16BuildSpec(BuildSpec[FusedMoETmW4A16Impl]):
-    """Immutable requirements for a grouped W4A16 MoE on the TurboMind
-    channel.
+    """Immutable requirements for a grouped W4A16 MoE on the TurboMind channel.
 
     ``ffn_dim`` is the rank-local expert width after moe-TP slicing; the
     kernel sees one expert list whose projections are ``hidden_dim ->

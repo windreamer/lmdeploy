@@ -1,0 +1,26 @@
+{
+ "triton": "3.7.1",
+ "torch": "2.12.1+cu130",
+ "results": [
+  {
+   "name": "1d_visibility_128",
+   "ok": true,
+   "detail": "grid=(128,) visible_stores=128/128 (claim: only ~16-32 of 128)"
+  },
+  {
+   "name": "3d_grid_256x16x4",
+   "ok": true,
+   "detail": "grid=(256,16,4) programs=16384 garbage_slots=0/16384"
+  },
+  {
+   "name": "3d_grid_4x5x8_production_shape",
+   "ok": true,
+   "detail": "grid=(4,5,8) programs=160 garbage_slots=0/160"
+  },
+  {
+   "name": "3d_grid_65535x2x1_large_x",
+   "ok": true,
+   "detail": "grid=(65535,2,1) programs=131070 garbage_slots=0/131070"
+  }
+ ]
+}

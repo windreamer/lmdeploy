@@ -11,6 +11,6 @@
 - [x] 契约发现:TM params 槽 (scale, min) vs PT (scale, zero) 代数等价(min = -zero·scale),codes 字节相同 → B3-04 只需 scatter 适配层(zero→min),量化内核零重写
 - [x] B3-04 产品化清单:CacheBackend int8 档布局声明、fill 布局参数化 + scatter 适配、TM fused write 的 (scale,min) 契约、opt-in 模型 checkpoint 导出/迁入需布局转换、门限用 KL+max_abs(argmatch 无判别力)
 
-**环境发现(必须上报)**:本机 triton 3.7.1 误编译——自写 kernel 大偏移 store 丢失、program_id(1/2) 垃圾值、kernel 内 div/mod 错误;**生产 `fill_kv_cache`(INT8)同样中招**(16 物理块仅 6 块写入有效 params,取证在 results json `production-fill-anomaly`)。本机的 triton 相关验证不可信,B3-04 与 GDN 判定中涉及 PT triton 基线的部分需健康工具链复验。
+**环境发现(2026-11-17 独立复验修正:REFUTED)**:原报告的 triton 3.7.1 误编译主张不成立——四项最小用例全部精确通过;「16 块仅 6 块有效」真实可复现,根因是原探针违例调用契约(1-D 块表 stride=1 读 2-D 页表越界,写入确定性落 {0,4,8,12}),非工具链问题。工具链告警撤回;`stride_boff==1` JIT 特化的越契约 IMA 附带发现移交上游参考。复验产物:`benchmark/b301_reverify/`(17/17 PASS)。
 
 **交付**:`benchmark/b3_01_bridge.py` / `b3_01_bridge_results.json` / `b3_01_bridge_report.md`(已暂存,待收口 commit)。

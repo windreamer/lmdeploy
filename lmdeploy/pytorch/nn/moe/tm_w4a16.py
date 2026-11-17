@@ -205,8 +205,8 @@ class FusedMoETmW4A16(FusedMoEBase):
         self._spill: TorchWeightSpill | None = None
 
     def update_weights(self):
-        """Pack the loaded AWQ experts into the TurboMind channel, then
-        spill the torch weights."""
+        """Pack the loaded AWQ experts into the TurboMind channel, then spill
+        the torch weights."""
         self.gate_up.validate_complete()
         self.down.validate_complete()
         self.impl.update_weights(

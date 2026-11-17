@@ -191,7 +191,6 @@ def run_tm_decode(q, pool, bsz, klen, stream):
 
 def run_pt_decode(q, pool, bsz, klen):
     """PT int8 read path on the same pool, via views of the TM layout."""
-    nb = pool.shape[0]
     kd, vd, kp, vp = pool_views(pool)
     # zero scale -> codes are ill-defined anyway; keep zero = 0 to avoid 0/0
     kzero = torch.where(kp[..., 0] > 0, -kp[..., 1] / kp[..., 0].clamp(min=1e-6),

@@ -1,0 +1,21 @@
+{
+ "triton": "3.7.1",
+ "torch": "2.12.1+cu130",
+ "results": [
+  {
+   "name": "vector_mixed_sign",
+   "ok": true,
+   "detail": "N=4099 neg_operands=3031 matches=trunc trunc={'q': True, 'r': True, 'idx': True} floor={'q': False, 'r': False, 'idx': True}"
+  },
+  {
+   "name": "scalar_pair_table",
+   "ok": true,
+   "detail": "pairs=15 trunc=True floor=False"
+  },
+  {
+   "name": "production_style_chain",
+   "ok": true,
+   "detail": "N=5000 written=1181 guarded_out=3819"
+  }
+ ]
+}

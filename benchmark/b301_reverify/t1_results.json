@@ -1,0 +1,31 @@
+{
+ "triton": "3.7.1",
+ "torch": "2.12.1+cu130",
+ "results": [
+  {
+   "name": "A_int64_full_blocks",
+   "ok": true,
+   "detail": "nb=128 blk_bytes=135168 visible_blocks=128/128 mismatched_bytes=0"
+  },
+  {
+   "name": "B_launcher_precomputed_i64_offsets",
+   "ok": true,
+   "detail": "nb=128 vec=1024 mismatched_bytes=0"
+  },
+  {
+   "name": "C_i32_boundary_int64_math",
+   "ok": true,
+   "detail": "total=2.250GiB stride=8MiB pids_straddling_2^31=[255, 256] mismatched_bytes=0"
+  },
+  {
+   "name": "D_i32_wrap_semantics_documented",
+   "ok": true,
+   "detail": "nprog=300 stride=2^23 wrapped_products=44 (expected C wrap-around, not store loss)"
+  },
+  {
+   "name": "E_masked_store_large_offset",
+   "ok": true,
+   "detail": "nb=128 vec=1024 mismatched_bytes=0"
+  }
+ ]
+}

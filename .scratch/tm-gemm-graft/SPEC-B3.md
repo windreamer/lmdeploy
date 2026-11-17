@@ -18,15 +18,15 @@ workflow: 本仓库开发分支续用,每阶段一 commit;stack PR 于批 3 落�
 
 ## User Stories
 
-1. 作为 GLM-5.3-flash 服务用户,我的 MoE 层走 TM grouped GEMM,以便 sparse 层推理拿到最高 7.67× 的单层加速。
-2. 作为 GLM-5.3-flash 服务用户,我的 GDN 层 decode 走 TM kernel,以便 34 层线性注意力的解码步进更快。
-3. 作为 int8-KV 用户,我的 KV 池在启用 opt-in 布局后由 TM 融合内核读取,以便 decode 档拿到 1.34–1.86× 的带宽优势。
-4. 作为在线服务用户,三种嫁接都遵循 auto 探询语义:不满足条件的层/模型自动回落 PyTorch 原生实现,以便升级无风险。
-5. 作为在线服务用户,探询失败在 forced 态得到明确报错,以便快速定位配置问题。
-6. 作为服务运维,MoE/GDN/int8-KV 三类启停都有独立旋钮,以便按模型特征逐类开关而非全有全无。
-7. 作为 RL 热更新用户,MoE 专家权重的热更路径与 dense 一致(规范化 → 打包 → spill),以便训练侧协议统一。
-8. 作为引擎开发者,GDN 状态池保持 PyTorch indexed 标准,以便 checkpoint/PD 迁移/驱逐语义零改动。
-9. 作为引擎开发者,int8-KV opt-in 布局只作用于显式启用的模型,以便其余模型的 KV 池零影响。
+01. 作为 GLM-5.3-flash 服务用户,我的 MoE 层走 TM grouped GEMM,以便 sparse 层推理拿到最高 7.67× 的单层加速。
+02. 作为 GLM-5.3-flash 服务用户,我的 GDN 层 decode 走 TM kernel,以便 34 层线性注意力的解码步进更快。
+03. 作为 int8-KV 用户,我的 KV 池在启用 opt-in 布局后由 TM 融合内核读取,以便 decode 档拿到 1.34–1.86× 的带宽优势。
+04. 作为在线服务用户,三种嫁接都遵循 auto 探询语义:不满足条件的层/模型自动回落 PyTorch 原生实现,以便升级无风险。
+05. 作为在线服务用户,探询失败在 forced 态得到明确报错,以便快速定位配置问题。
+06. 作为服务运维,MoE/GDN/int8-KV 三类启停都有独立旋钮,以便按模型特征逐类开关而非全有全无。
+07. 作为 RL 热更新用户,MoE 专家权重的热更路径与 dense 一致(规范化 → 打包 → spill),以便训练侧协议统一。
+08. 作为引擎开发者,GDN 状态池保持 PyTorch indexed 标准,以便 checkpoint/PD 迁移/驱逐语义零改动。
+09. 作为引擎开发者,int8-KV opt-in 布局只作用于显式启用的模型,以便其余模型的 KV 池零影响。
 10. 作为 QA,MoE 嫁接的 impl 级对照与 triton fused_moe 同权重同路由,以便正确性可机械验证。
 11. 作为 QA,GDN 嫁接的 decode 输出与 PT fla 生产 kernel 位级/容差对照,以便回归可判定。
 12. 作为 QA,int8-KV 读取与 PT int8 写入格式互通(同一池两种写入方),以便混合链路不失配。

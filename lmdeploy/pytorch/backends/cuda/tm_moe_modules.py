@@ -105,7 +105,10 @@ class TurbomindMoeW4A16Impl(FusedMoETmW4A16Impl):
         self._published = False
 
     def _weight_plan(self, linear, fusion_type: str | None, dtype: torch.dtype):
-        """Cached registry plan. The query is deterministic per format."""
+        """Cached registry plan.
+
+        The query is deterministic per format.
+        """
         key = fusion_type or 'plain'
         if key not in self._plan:
             self._plan[key] = linear.get_weight_plan(

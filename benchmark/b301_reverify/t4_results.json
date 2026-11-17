@@ -1,0 +1,31 @@
+{
+ "triton": "3.7.1",
+ "torch": "2.12.1+cu130",
+ "results": [
+  {
+   "name": "B4_klen256_nb16_misuse-padded",
+   "ok": true,
+   "detail": "blocks_with_valid_params=4/16 predicted_flat_index_placement=[0, 4, 8, 12] observed=[0, 4, 8, 12] untouched_blocks_zero=True"
+  },
+  {
+   "name": "B4_klen256_nb16_correct",
+   "ok": true,
+   "detail": "blocks_with_valid_params=16/16 codes_benign(+-1/wrap)=True codes_neq=861/1048576 scales_neq=0 zeros_max_ulp=2 empty_code_blocks=0 placement=kc[4b+j]"
+  },
+  {
+   "name": "B4_klen256_nb16_correct",
+   "ok": true,
+   "detail": "blocks_with_valid_params=16/16 codes_benign(+-1/wrap)=True codes_neq=849/1048576 scales_neq=0 zeros_max_ulp=2 empty_code_blocks=0 placement=kc[4b+j]"
+  },
+  {
+   "name": "B4_klen1024_nb64_correct",
+   "ok": true,
+   "detail": "blocks_with_valid_params=64/64 codes_benign(+-1/wrap)=True codes_neq=3386/4194304 scales_neq=0 zeros_max_ulp=2 empty_code_blocks=0 placement=kc[4b+j]"
+  },
+  {
+   "name": "B8_klen4096_nb512_correct",
+   "ok": true,
+   "detail": "blocks_with_valid_params=512/512 codes_benign(+-1/wrap)=True codes_neq=27652/33554432 scales_neq=0 zeros_max_ulp=2 empty_code_blocks=0 placement=kc[4b+j]"
+  }
+ ]
+}

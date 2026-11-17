@@ -187,6 +187,9 @@ with set_envs():
     w4a16_gemm_backend = env_to_choice('LMDEPLOY_W4A16_GEMM_BACKEND', 'auto',
                                        {'auto', 'triton', 'turbomind'})
 
+    # gated delta rule decode
+    gdn_backend = env_to_choice('LMDEPLOY_GDN_BACKEND', 'off', {'auto', 'on', 'off'})
+
     # model agent
     skip_warmup = env_to_bool('LMDEPLOY_SKIP_WARMUP', False)
 
