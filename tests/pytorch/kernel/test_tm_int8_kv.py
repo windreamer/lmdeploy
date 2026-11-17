@@ -114,8 +114,8 @@ def _assert_gate(out, ref, label):
 
 def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0):
     """One TM write-kernel append of new tokens (token-major slices)."""
-    from lmdeploy.turbomind import _tm
     from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
+    from lmdeploy.turbomind import _tm
 
     k_cache, v_cache, k_sz, v_sz = _layer_views(pool, layer)
     pool_base, block_bytes, _, num_kv_heads, head_dim = (
@@ -136,8 +136,8 @@ def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0):
 
 
 def _tm_decode(q, pool, klen, layer=0):
-    from lmdeploy.turbomind import _tm
     from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
+    from lmdeploy.turbomind import _tm
 
     k_cache = _layer_views(pool, layer)[0]
     ptrs, cu_block_base = tm_block_pointer_table(_block_offsets(), k_cache.data_ptr(), k_cache.stride(0))
@@ -200,10 +200,13 @@ def test_layout_views_and_writer_roundtrip():
 
     _, k, v = _make_data()
     q_seqlens = [PREFILL_LEN] * BATCH
-    # The writer treats input rows as packed (sum of q_seqlens); pass only
-    # the real prefill tokens.
-    fill_kv_cache_tm(k.reshape(-1, NUM_KV_HEADS, HEAD_DIM)[:BATCH * PREFILL_LEN],
-                     v.reshape(-1, NUM_KV_HEADS, HEAD_DIM)[:BATCH * PREFILL_LEN],
+    # Writer input rows are tightly packed in batch order (the fill_kv_cache
+    # contract): batch b occupies rows [b * q_seqlens[b], (b + 1) * q_seqlens[b]).
+    # Truncate each sequence to its append length BEFORE flattening; slicing a
+    # flat b-major reshape instead interleaves other batches' rows into every
+    # batch, the exact B3-04 multi-batch placement symptom.
+    fill_kv_cache_tm(k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                     v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
                      k_cache, v_cache, k_sz, v_sz,
                      _cu(q_seqlens)[:-1].long(),
                      torch.tensor(q_seqlens, dtype=torch.long, device='cuda'),
@@ -221,8 +224,8 @@ def test_layout_views_and_writer_roundtrip():
 
 
 def test_bridge_write_and_tm_decode_matches_reference():
-    """TM write kernel -> TM pool -> TM decode vs the bf16 reference (S1
-    gate) and vs the pool's own dequantization."""
+    """TM write kernel -> TM pool -> TM decode vs the bf16 reference (S1 gate)
+    and vs the pool's own dequantization."""
     _, k, v = _make_data()
     q, _, _ = _make_data(seed=3)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
@@ -243,8 +246,8 @@ def test_bridge_write_and_tm_decode_matches_reference():
 
 
 def test_pt_reader_on_tm_pool():
-    """Stock Triton paged attention reads the TM pool through the strided
-    views with (scale, min) -> (scale, zero) conversion."""
+    """Stock Triton paged attention reads the TM pool through the strided views
+    with (scale, min) -> (scale, zero) conversion."""
     _, k, v = _make_data()
     q, _, _ = _make_data(seed=5)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
@@ -262,28 +265,48 @@ def test_pt_reader_on_tm_pool():
     assert cross <= 0.25, 'both readers must stay within the int8 max_abs budget'
 
 
+@pytest.mark.xfail(strict=True, reason='B3-04: tm_attn_decode zero-writes the last valid '
+                      "position's KV (codes+params, all heads, K and V) on every call — "
+                      'bench-binding contract violation, see benchmark/b304_debug/NOTES.md')
 def test_mixed_chain_prefill_then_decode():
     """B3-01's core assertion on the production path: one pool receives a
     prefill append then real one-token decode appends, and both readers stay
-    correct over the full length."""
+    correct over the full length.
+
+    Currently xfailed on a kernel-side defect, NOT the ATen writer: the ATen
+    writer's placement is byte-exact for packed feeds (see
+    test_aten_writer_multi_batch_packed_placement). The decode binding
+    (src/turbomind/python/attn_bench_bind.cpp, BuildDecodePlan) sets
+    readonly_block_num = nullptr and wires params.k/v into a Q-only qkv
+    workspace, so the universal kernel's kProcessKV branch
+    (src/turbomind/kernels/attention/attention_universal.h:59 — kProcessKV is
+    hardcoded true for DecodingCtaMap) stores "converted" K/V of the empty
+    workspace rows back into the pool at ti = history_len: the last valid
+    position of every sequence is zeroed on every decode call. The in-loop
+    decodes therefore corrupt exactly the slots this test round-trips.
+    """
     _, k, v = _make_data()
     q, _, _ = _make_data(seed=7)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
     pool_t = pool.pools[0].tensor
-    kt = k.reshape(-1, NUM_KV_HEADS, HEAD_DIM)
-    vt = v.reshape(-1, NUM_KV_HEADS, HEAD_DIM)
+    # Packed rows in batch order: truncate to the append length BEFORE
+    # flattening (see the roundtrip test), and the bridge reads batch b's
+    # tokens at rows [b * q_len, (b + 1) * q_len) for its cu_q bases.
+    kt = k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM)
+    vt = v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM)
 
-    _bridge_fill(kt[:BATCH * PREFILL_LEN], vt[:BATCH * PREFILL_LEN], [PREFILL_LEN] * BATCH, pool)
+    _bridge_fill(kt, vt, [PREFILL_LEN] * BATCH, pool)
     torch.cuda.synchronize()
     snapshot = pool_t.clone()
 
     # Production fill path: the triton-free ATen writer appends the decode
-    # steps into the same pool the bridge-prefilled half lives in.
+    # steps into the same pool the bridge-prefilled half lives in. One new
+    # token per sequence: the (B, Hkv, D) grid at one position IS the packed
+    # layout for q_seqlens = [1] * BATCH.
     from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm
     for step in range(DECODE_STEPS):
-        begin = BATCH * (PREFILL_LEN + step)
         kv_now = PREFILL_LEN + step + 1
-        fill_kv_cache_tm(kt[begin:begin + BATCH], vt[begin:begin + BATCH],
+        fill_kv_cache_tm(k[:, PREFILL_LEN + step], v[:, PREFILL_LEN + step],
                          *_layer_views(pool, 0),
                          _cu([1] * BATCH)[:-1].long(),
                          torch.tensor([1] * BATCH, dtype=torch.long, device='cuda'),
@@ -320,19 +343,108 @@ def test_aten_writer_pool_decodes():
     q, _, _ = _make_data(seed=9)
     pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
     k_cache, v_cache, k_sz, v_sz = _layer_views(pool, 0)
-    fill_kv_cache_tm(k.reshape(-1, NUM_KV_HEADS, HEAD_DIM)[:BATCH * PREFILL_LEN],
-                     v.reshape(-1, NUM_KV_HEADS, HEAD_DIM)[:BATCH * PREFILL_LEN],
+    fill_kv_cache_tm(k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                     v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
                      k_cache, v_cache, k_sz, v_sz,
-                     torch.zeros(BATCH, dtype=torch.long, device='cuda'),
+                     _cu([PREFILL_LEN] * BATCH)[:-1].long(),
                      torch.full((BATCH, ), PREFILL_LEN, dtype=torch.long, device='cuda'),
                      torch.full((BATCH, ), PREFILL_LEN, dtype=torch.long, device='cuda'),
                      _block_offsets())
     torch.cuda.synchronize()
 
+    # The decode gates below cannot tell a dropped batch from a filled one
+    # (B3-04: a wrong q_start_loc left batches 1..3 zero yet still passed);
+    # assert the pool content itself so every batch is pinned down.
+    kq, vq = _dequant_pool(pool.pools[0].tensor, layer=0)
+    kt = k.float().reshape(BATCH, KLEN, NUM_KV_HEADS, HEAD_DIM)
+    vt = v.float().reshape(BATCH, KLEN, NUM_KV_HEADS, HEAD_DIM)
+    assert (kq[:, :PREFILL_LEN] - kt[:, :PREFILL_LEN]).abs().max().item() <= 0.05
+    assert (vq[:, :PREFILL_LEN] - vt[:, :PREFILL_LEN]).abs().max().item() <= 0.05
+    assert kq[:, PREFILL_LEN:].abs().max().item() == 0.0
+
     out = _tm_decode(q, pool, PREFILL_LEN)
     _assert_gate(out, _reference(q, k, v, PREFILL_LEN), 'tm-decode/aten-writer')
     out_pt = _pt_decode(q, pool, PREFILL_LEN)
     _assert_gate(out_pt, _reference(q, k, v, PREFILL_LEN), 'pt-reader/aten-writer')
+
+
+def test_aten_writer_multi_batch_packed_placement():
+    """B3-04 regression: with correctly packed input the ATen writer places
+    every token at its contract slot in multi-batch appends, and slots
+    outside the append range stay untouched.
+
+    Constant per-token values plus fp32 param slots make the round trip
+    exact, so each pool row's provenance is byte-identifiable: a single
+    misplaced token cannot hide inside a tolerance gate.
+    """
+    from lmdeploy.pytorch.backends.tm_kv import TmInt8BlockCacheLayout, fill_kv_cache_tm
+    from lmdeploy.pytorch.engine.cache_engine.schema import CacheDesc, CacheTensorSpec
+
+    def run_case(tag, batch, q_lens, kv_lens):
+        s, h, d = 64, 2, 8
+        ncols = max(-(-l // s) for l in kv_lens)
+        kv_shape = [s, h, d]
+        specs = (
+            CacheTensorSpec(name='k_cache', desc=CacheDesc(shape=kv_shape, dtype=torch.uint8)),
+            CacheTensorSpec(name='v_cache', desc=CacheDesc(shape=kv_shape, dtype=torch.uint8)),
+            CacheTensorSpec(name='quant_0', desc=CacheDesc(shape=kv_shape[:-1] + [2], dtype=torch.float32)),
+            CacheTensorSpec(name='quant_1', desc=CacheDesc(shape=kv_shape[:-1] + [2], dtype=torch.float32)),
+        )
+        layout = TmInt8BlockCacheLayout(specs, num_layers=1)
+        allocation = layout.allocate(batch * ncols, 'cuda')
+        pool = allocation.pools[0].tensor
+        k_cache, v_cache, k_sz, v_sz = tuple(v[0] for v in allocation.tensor_views)
+
+        # Packed rows in batch order; a unique constant value per token makes
+        # the dequantized pool content byte-identifiable.
+        vals, per_batch = [], []
+        row = 0
+        for bi in range(batch):
+            n = q_lens[bi]
+            base = (torch.arange(n, dtype=torch.float32) + row + 1) * 0.01
+            vals.append(base[:, None, None].expand(n, h, d))
+            per_batch.append(base)
+            row += n
+        key = torch.cat(vals).cuda() if vals else torch.zeros(0, h, d).cuda()
+        value = -key
+
+        q_seqlens = torch.tensor(q_lens, dtype=torch.long, device='cuda')
+        kv_seqlens = torch.tensor(kv_lens, dtype=torch.long, device='cuda')
+        q_start_loc = torch.nn.functional.pad(torch.cumsum(q_seqlens.cpu(), 0), (1, 0))[:-1].cuda().long()
+        block_offsets = (torch.arange(batch, device='cuda')[:, None] * ncols +
+                         torch.arange(ncols, device='cuda')[None, :]).int()
+        fill_kv_cache_tm(key, value, k_cache, v_cache, k_sz, v_sz,
+                         q_start_loc, q_seqlens, kv_seqlens, block_offsets)
+        torch.cuda.synchronize()
+
+        # Exact readback: constant tokens quantize to code 0 with min = value.
+        num_blocks = batch * ncols
+        h2sd = 2 * h * s * d
+        codes = pool[0, :, :h2sd].view(num_blocks, h, 2, s, d).float()
+        params = pool[0, :, h2sd:].view(torch.float32).view(num_blocks, h, 2, s, 2)
+        kdeq = codes[:, :, 0] * params[:, :, 0][..., 0:1] + params[:, :, 0][..., 1:2]
+        rows = kdeq.permute(0, 2, 1, 3).reshape(num_blocks * s, h, d)[:, 0, 0].cpu()
+        offsets = block_offsets.cpu()
+
+        touched = torch.zeros(num_blocks * s, dtype=torch.bool)
+        for bi in range(batch):
+            for j in range(q_lens[bi]):
+                pos = kv_lens[bi] - q_lens[bi] + j
+                want = offsets[bi, pos // s].item() * s + pos % s
+                touched[want] = True
+                assert rows[want].item() == per_batch[bi][j].item(), \
+                    f'{tag}: token (b{bi}, idx {j}) expected at pool row {want} with value ' \
+                    f'{per_batch[bi][j].item()}, found {rows[want].item()}'
+        stray = (~touched) & (rows != 0)
+        assert not stray.any().item(), \
+            f'{tag}: {stray.sum().item()} pool rows written outside the append range'
+
+    # single batch stays bit-exact (B=1 makes any batch order coincide)
+    run_case('single-batch control', 1, [192], [192])
+    # ragged multi-batch with a zero-length row
+    run_case('ragged multi-batch', 4, [5, 0, 3, 2], [5, 7, 3, 2])
+    # the mixed-chain shape: one new token per sequence past position 192
+    run_case('multi-batch decode step', 4, [1, 1, 1, 1], [193, 193, 193, 193])
 
 
 def test_block_copy_moves_whole_entries():
@@ -345,7 +457,7 @@ def test_block_copy_moves_whole_entries():
     src, dst = 2, 5
     before = pool[0, src].clone()
     pool[0, dst] = 0
-    pool.index_copy_(0, torch.tensor([dst], device='cuda'), pool[0:1, src:src + 1].clone())
+    pool.index_copy_(1, torch.tensor([dst], device='cuda'), pool[:, src:src + 1].clone())
     torch.cuda.synchronize()
     assert (pool[0, dst] == before).all().item()
     # the CUDA backend's copy primitive accepts the layout's allocation
