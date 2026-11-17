@@ -9,13 +9,13 @@ of the ticket is delivered.
 
 ## 1. Placement decisions (放置决策)
 
-| deliverable | location | why |
-| --- | --- | --- |
-| MoE / int8-KV / TP=2 rungs | `benchmark/w4a16_acceptance.py`, `--suite {gemm,moe,int8kv,tp2}` | one harness, one decode-timing core; the ticket 05 matrix stays `--suite gemm` with unchanged semantics (regression re-run: tiny preset green) |
-| tiny dense checkpoint with `head_dim=64` | `benchmark/tiny_b306_checkpoints.py::gen_tiny_dense_ct` | the ticket 03 tiny carries `head_dim=32`, which the TM int8-KV geometry probe rejects; 64 passes |
-| tiny MoE checkpoint | built by the ticket 02 golden gate (`_make_tiny_moe_pair`), reused not rewritten | proven ct Mixtral pair; the glm4_moe architecture attempt is recorded as a source gap (below) |
-| reports | `reports/w4a16/b306_{moe,int8kv,tp2}/report.{json,md}` | sibling of the ticket 05 `reports/w4a16/` output; JSON for machines, MD for review |
-| SPEC-B3 / ROADMAP closure | section 5 below | `.scratch/` is outside this ticket's write scope, so the closure text is delivered ready to paste |
+| deliverable                              | location                                                                         | why                                                                                                                                            |
+| ---------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| MoE / int8-KV / TP=2 rungs               | `benchmark/w4a16_acceptance.py`, `--suite {gemm,moe,int8kv,tp2}`                 | one harness, one decode-timing core; the ticket 05 matrix stays `--suite gemm` with unchanged semantics (regression re-run: tiny preset green) |
+| tiny dense checkpoint with `head_dim=64` | `benchmark/tiny_b306_checkpoints.py::gen_tiny_dense_ct`                          | the ticket 03 tiny carries `head_dim=32`, which the TM int8-KV geometry probe rejects; 64 passes                                               |
+| tiny MoE checkpoint                      | built by the ticket 02 golden gate (`_make_tiny_moe_pair`), reused not rewritten | proven ct Mixtral pair; the glm4_moe architecture attempt is recorded as a source gap (below)                                                  |
+| reports                                  | `reports/w4a16/b306_{moe,int8kv,tp2}/report.{json,md}`                           | sibling of the ticket 05 `reports/w4a16/` output; JSON for machines, MD for review                                                             |
+| SPEC-B3 / ROADMAP closure                | section 5 below                                                                  | `.scratch/` is outside this ticket's write scope, so the closure text is delivered ready to paste                                              |
 
 ## 2. Measured data (实测)
 
@@ -25,10 +25,10 @@ Tiny ct Mixtral (8 experts, top-2, group 128), decode 32 tokens, 2 timed
 passes + warmup, seq 256:
 
 | batch | triton fused_moe tok/s | TM grouped W4A16 tok/s | TM/Triton |
-|---|---|---|---|
-| 1 | 801.5 | 743.7 | 0.93 |
-| 8 | 794.9 | 868.3 | 1.09 |
-| 32 | 827.6 | 804.5 | 0.97 |
+| ----- | ---------------------- | ---------------------- | --------- |
+| 1     | 801.5                  | 743.7                  | 0.93      |
+| 8     | 794.9                  | 868.3                  | 1.09      |
+| 32    | 827.6                  | 804.5                  | 0.97      |
 
 S1 numeric gate: **PASS** — worst truncated KL 1.21e-03 ≤ 1.0e-02
 (`MOE_TINY_KL_THRESHOLD`), top-1 agreement recorded in the report. The KL
@@ -42,10 +42,10 @@ Smoke tier (b=1, 8 tokens, 0 timed passes) also green: worst KL 1.21e-03.
 Stock int8 KV path (knob off), same rung geometry:
 
 | batch | stock int8 KV tok/s |
-|---|---|
-| 1 | 811.9 |
-| 8 | 799.9 |
-| 32 | 768.0 |
+| ----- | ------------------- |
+| 1     | 811.9               |
+| 8     | 799.9               |
+| 32    | 768.0               |
 
 The TM int8-KV on-route (`LMDEPLOY_TM_ATTN_INT8_KV=on`) cannot complete
 engine start on this tree. Four source defects, all reproduced and

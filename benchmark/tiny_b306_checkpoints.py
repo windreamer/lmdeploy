@@ -94,7 +94,10 @@ def _ct_quantization_config() -> dict:
 
 
 def gen_tiny_dense_ct(out_dir: str, tokenizer_src: str, seed: int = 11, num_layers: int = DENSE_NUM_LAYERS) -> dict:
-    """Write the tiny dense ct checkpoint with head_dim 64. Returns the config."""
+    """Write the tiny dense ct checkpoint with head_dim 64.
+
+    Returns the config.
+    """
     os.makedirs(out_dir, exist_ok=True)
     _copy_tokenizer(out_dir, tokenizer_src)
     torch.manual_seed(seed)
