@@ -13,10 +13,13 @@
 ## T1 修复面验证
 
 命令:
+
 ```
 .venv/bin/python benchmark/b304_verify/verify_b304_fix.py; echo "expect exit=0"
 ```
+
 原始输出(exit=0,Wall time 2.18 s,完整 13 行 PASS):
+
 ```
 [PASS] bf16: pool byte-identical after decode
 [PASS] bf16: output vs fp32 reference  (max_abs=0.00051)
@@ -33,26 +36,32 @@
 [PASS] bench: bf16 pool byte-identical after 13 dispatches
 ALL CASES PASSED
 ```
+
 观测值汇总:exit=0;bf16 max_abs=0.00051;int8 max_abs=0.00056;int8 code_delta 上限观测 2(K、V、scaled 重量化三处均 =2);scale 重标定 diff=0.00012,min 重标定 diff=0.00000;bf16 pool 逐字节一致。
 
 ## T2 bench 门禁
 
 命令:
+
 ```
 .venv/bin/python benchmark/bench_attn_decode.py --kv-quants 0 8 --bsz 4 --klen 256 --iters 20 --warmup 5
 ```
+
 原始输出(exit=0,Wall time 3.53 s;首行 `fast_hadamard_transform not installed, falling back to matmul-based Hadamard transform` 为环境提示):
+
 ```
 [check] kv_quant=0 tm_max_abs=0.0005 pt_max_abs=0.0005 -> ok
 [check] kv_quant=8 tm_max_abs=0.0005 pt_max_abs=0.0010 -> ok
 [0] B=   4 klen=  256  TM   0.0144 ms (  291.3 GB/s)  PT   0.0977 ms (   42.9 GB/s)  PT/TM x6.788
 [8] B=   4 klen=  256  TM   0.0149 ms (  140.9 GB/s)  PT   0.0911 ms (   23.0 GB/s)  PT/TM x6.125
 ```
+
 观测值汇总:tm_max_abs = 0.0005(kv_quant=0)、0.0005(kv_quant=8);两行 check 输出 `ok`。
 
 ## T3 缺陷再现(修复前 binding)
 
 **操作单偏差记录(重要)**:操作单的 `git stash push -- <三文件>` 在本树不可执行,原因有二,均如实观测:
+
 1. 三文件与 HEAD 一致且修复已提交(`45e9322c`),工作树无 diff 可 stash(即使 index 可写,stash 也会报 "no local changes to save");
 2. index 被他人 unmerged 文件阻塞:`git stash push` 实际报 `error: could not write index` + 13 条 `needs merge`(exit=1)。
 
@@ -61,22 +70,28 @@ ALL CASES PASSED
 `git diff --stat 45e9322c^ 45e9322c -- <三文件>`:attn_bench_bind.cpp +133 行级变更、bench_attn_decode.py 48、sanitizer_entry_b304.py 19(即修复前版本确有实质差异)。
 
 重建(修复前源):
+
 ```
 cmake --build build --target _turbomind -j$(nproc)   # exit=0, 5.65 s, "Linking CXX shared module .../_turbomind...so"
 ```
+
 .so 时间戳刷新 15:50:25,size 903,640,000 B。
 
 复现运行:
+
 ```
 .venv/bin/python benchmark/b304_verify/repro_b304_defect.py   # exit=0, Wall time 2.07 s
 ```
+
 原始输出(末 4 行):
+
 ```
 last slot  (ti=99) : code bytes changed = 1024/1024, param values changed = 32/32
 mid slot   (ti=50) : code bytes changed = 0/1024, param values changed = 0/32
 last slot fully zeroed after call: True
 DEFECT REPRODUCED
 ```
+
 观测值汇总:exit=0;日志含 `DEFECT REPRODUCED`;末位槽(ti=99)1024/1024 code 字节与 32/32 param 值被改写且"fully zeroed = True";中间槽(ti=50)0/1024、0/32 未动。
 
 还原 + 重建(修复后源):restore exit=0、三文件 status 干净;重建 exit=0,5.74 s,.so 时间戳 15:51:00,size 903,715,040 B(与修复前 .so 尺寸不同,确认换回修复实现)。
@@ -84,16 +99,21 @@ DEFECT REPRODUCED
 ## T4 sanitizer(修复后 binding,构建于 T3 还原之后)
 
 initcheck:
+
 ```
 compute-sanitizer --tool initcheck --error-exitcode 9 .venv/bin/python benchmark/b304_debug/sanitizer_entry_b304.py
 ```
+
 观测:exit=0;末 4 行含 `SANITIZER ENTRY B304 DONE`、`========= ERROR SUMMARY: 0 errors`;日志中 `========= ` 前缀行仅 2 条(banner + summary),即 0 条 hit;无 leak 行。Wall time 4.91 s。
 
 memcheck:
+
 ```
 compute-sanitizer --tool memcheck --error-exitcode 9 .venv/bin/python benchmark/b304_debug/sanitizer_entry_b304.py
 ```
+
 观测:**exit=9**(`--error-exitcode` 生效);`========= ERROR SUMMARY: 4 errors`;`Program hit cudaErrorInvalidValue (error 1) due to "invalid argument"` 共 4 条:
+
 - 2× `CUDA API call to cudaFuncSetAttribute`
 - 2× `CUDA API call to cudaGetLastError`(两条 FuncSetAttribute 后各伴随一条,符合 sticky-error 传播形态)
 

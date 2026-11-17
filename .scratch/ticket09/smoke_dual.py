@@ -52,8 +52,9 @@ def main():
     if not turbomind.is_available():
         sys.exit('TurboMind native modules not built')
 
-    from lmdeploy.pytorch.backends.cuda.awq_modules import AwqLinearW4A16Impl
     from lmdeploy.pytorch.backends.cuda.turbomind_awq_modules import TurbomindAwqLinearW4A16Impl
+
+    from lmdeploy.pytorch.backends.cuda.awq_modules import AwqLinearW4A16Impl
 
     print(f"device: {torch.cuda.get_device_name(0)} sm{torch.cuda.get_device_capability()}")
     files = sorted(glob.glob(os.path.join(MODEL_DIR, '*.pt')))

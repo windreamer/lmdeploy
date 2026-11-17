@@ -18,8 +18,8 @@ import pytest
 import torch
 
 import lmdeploy.pytorch.envs as envs
-from lmdeploy.pytorch.backends.tm_kv import _parse_knob
 from lmdeploy.pytorch.backends.cuda.tm_moe_modules import tm_moe_route
+from lmdeploy.pytorch.backends.tm_kv import _parse_knob
 
 TM_CLASSES = ('w4a16', 'moe_grouped', 'gdn', 'attn_int8_kv')
 
@@ -55,7 +55,7 @@ def test_parse_unset_leaves_all_classes_open():
 
 @pytest.mark.parametrize('token,state', [('off', 'off'), ('auto', 'auto'), ('all', 'on')])
 def test_parse_global_token_sets_every_class(token, state):
-    """off/auto/all map onto per-class states for all classes."""
+    """Off/auto/all map onto per-class states for all classes."""
     assert envs.parse_tm_kernels(token) == dict.fromkeys(TM_CLASSES, state)
 
 
@@ -158,9 +158,11 @@ def test_class_entries_are_isolated(monkeypatch):
 
 
 def test_legacy_environ_only_applies_through_import(monkeypatch):
-    """The w4a16 legacy env is read at import; runtime behavior is the
-    import-time attribute. Setting the environ var alone must not flip a
-    decision (the attribute is the single runtime source)."""
+    """The w4a16 legacy env is read at import; runtime behavior is the import-
+    time attribute.
+
+    Setting the environ var alone must not flip a decision (the attribute is the single runtime source).
+    """
     monkeypatch.setenv('LMDEPLOY_W4A16_GEMM_BACKEND', 'turbomind')
     _set_legacy(monkeypatch, 'auto')
     assert envs.tm_kernel_state('w4a16') == 'auto'
@@ -273,14 +275,14 @@ def test_moe_route_big_env_off_routes_triton(monkeypatch):
 
 
 def test_moe_route_big_env_forced_raises(monkeypatch):
-    """on forces the grouped route and fails loudly on a bad geometry."""
+    """On forces the grouped route and fails loudly on a bad geometry."""
     monkeypatch.setenv('LMDEPLOY_TM_KERNELS', 'moe_grouped=on')
     with pytest.raises(RuntimeError, match='TurboMind grouped MoE'):
         _moe_route(w_bit=3)
 
 
 def test_moe_route_big_env_auto_probes(monkeypatch):
-    """auto probes and reports the probe reason on a bad geometry."""
+    """Auto probes and reports the probe reason on a bad geometry."""
     monkeypatch.setenv('LMDEPLOY_TM_KERNELS', 'moe_grouped=auto')
     reason = _moe_route(w_bit=3)
     assert reason is not None and 'w_bit' in reason
@@ -321,7 +323,7 @@ def _dense_spec(**overrides):
 
 def test_dense_route_big_env_off_keeps_awq_triton(monkeypatch):
     """The w4a16 class entry off builds the historical AWQ Triton impl."""
-    from lmdeploy.pytorch.backends.cuda.awq_modules import _build_linear_w4a16, AwqLinearW4A16Impl
+    from lmdeploy.pytorch.backends.cuda.awq_modules import AwqLinearW4A16Impl, _build_linear_w4a16
     monkeypatch.setenv('LMDEPLOY_TM_KERNELS', 'w4a16=off')
     impl = _build_linear_w4a16(_dense_spec(**SUPPORTED))
     assert isinstance(impl, AwqLinearW4A16Impl)
@@ -330,7 +332,7 @@ def test_dense_route_big_env_off_keeps_awq_triton(monkeypatch):
 @pytest.mark.parametrize('value', ['w4a16=off', 'off'])
 def test_dense_route_off_states_agree(monkeypatch, value):
     """The global off token and the class entry pick the same impl."""
-    from lmdeploy.pytorch.backends.cuda.awq_modules import _build_linear_w4a16, AwqLinearW4A16Impl
+    from lmdeploy.pytorch.backends.cuda.awq_modules import AwqLinearW4A16Impl, _build_linear_w4a16
     monkeypatch.setenv('LMDEPLOY_TM_KERNELS', value)
     impl = _build_linear_w4a16(_dense_spec(**SUPPORTED))
     assert isinstance(impl, AwqLinearW4A16Impl)
@@ -348,7 +350,7 @@ def test_dense_route_big_env_on_builds_tm(monkeypatch):
 
 @cuda_required
 def test_dense_route_big_env_on_raises_on_unsupported(monkeypatch):
-    """on raises on a rejected shape instead of slowing down."""
+    """On raises on a rejected shape instead of slowing down."""
     from lmdeploy.pytorch.backends.cuda.awq_modules import _build_linear_w4a16
     monkeypatch.setenv('LMDEPLOY_TM_KERNELS', 'w4a16=on')
     with pytest.raises(RuntimeError, match='unavailable or incompatible'):
@@ -357,8 +359,8 @@ def test_dense_route_big_env_on_raises_on_unsupported(monkeypatch):
 
 @cuda_required
 def test_dense_route_big_env_auto_falls_back(monkeypatch):
-    """auto falls back per layer when the registry rejects the shape."""
-    from lmdeploy.pytorch.backends.cuda.awq_modules import _build_linear_w4a16, AwqLinearW4A16Impl
+    """Auto falls back per layer when the registry rejects the shape."""
+    from lmdeploy.pytorch.backends.cuda.awq_modules import AwqLinearW4A16Impl, _build_linear_w4a16
     monkeypatch.setenv('LMDEPLOY_TM_KERNELS', 'w4a16=auto')
     impl = _build_linear_w4a16(_dense_spec(**UNSUPPORTED))
     assert isinstance(impl, AwqLinearW4A16Impl)

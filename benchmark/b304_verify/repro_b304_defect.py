@@ -56,8 +56,14 @@ cu_block_nums = torch.arange(0, (B + 1) * BPS, BPS, dtype=torch.int32, device='c
 
 LAST = KLEN - 1          # 99: last valid position per sequence
 MID = 50                 # interior position, must stay untouched
-blk = lambda b, p: b * BPS + p // S
-off = lambda p: p % S
+
+
+def blk(b, p):
+    return b * BPS + p // S
+
+
+def off(p):
+    return p % S
 
 
 def snapshot(p):
