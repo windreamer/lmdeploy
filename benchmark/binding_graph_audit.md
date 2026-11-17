@@ -2,7 +2,7 @@
 
 审计期间仓库有更新(`attn_bench_bind.cpp` 新增 `tm_attn_decode_graph`、`int8_kv.py` 新增 `_forward_tm_decode_graph`/`_graph_state`),本报告以**更新后的工作区状态**为准。六模式定义:P1 栈上 H2D 烘焙 / P2 捕获区内释放 / P3 host 烘焙长度或指针 / P4 捕获期 host sync / P5 布尔掩码 scatter / P6 捕获期分配。
 
----
+______________________________________________________________________
 
 ## 1. 审计矩阵总表
 
@@ -10,109 +10,114 @@
 
 ### C++ bindings
 
-|审计单元|P1|P2|P3|P4|P5|P6|生产可达性|结论|
-|---|---|---|---|---|---|---|---|---|
-|`bind.cpp` DLPack(from_dlpack/__dlpack__/reinterpret/t)|✅|✅|✅|✅|✅|✅|引擎/加载期|合规(纯元数据)|
-|`bind.cpp` Tensor.copy_from(无 stream → safe_memcpy,同步)/copy_from(stream)|✅|✅|✅|✅|✅|✅|加载期(`turbomind/linear.py:242`、`builders/_base.py:110`)|合规(若被捕获链调用会 P4,现无此路径)|
-|`bind.cpp` generic_copy_on_stream|✅|✅|✅|✅|✅|✅|无 python 调用者(legacy/bench)|合规|
-|`bind.cpp` ContextGuard/create_device_context/Param/Module/TurboMind/ModelRequest|✅|✅|✅|✅|✅|✅|引擎/加载期|合规|
-|`attn_bench_bind.cpp` attn_decode_bench|✅|✅|✅|✅|✅|✅|**bench-only**|合规(host `std::vector`→pageable H2D 有驱动暂存同步语义,非悬空)|
-|`attn_bench_bind.cpp` tm_attn_decode(eager)|✅|✅|❌ `:209-210`|✅|✅|✅|**eager decode**(图关/桶未命中)|**违例,见 E1**|
-|`attn_bench_bind.cpp` tm_attn_decode_graph(修后核对)|✅|✅|✅|✅|✅|✅|decode 图捕获+回放|**合规(缺陷①②③修复到位,见 §5)**|
-|`attn_bench_bind.cpp` tm_process_kv|✅|✅|✅|✅|✅|✅|捕获安全(env 默认关;q_len=1 非法访问仍在查,`int8_kv.py:92-94`)|合规|
-|`linear_attn/python_bind.cpp` delta_rule_plan|✅|✅|✅|⚠️ 标注(`:222-225` chunked 模式同步 D2H)|✅|✅|规划期(warmup/step 构建,非捕获链)|合规|
-|`linear_attn/python_bind.cpp` delta_rule_prepare_state_tma_descs / delta_rule_run|✅|✅|✅|✅|✅|✅|TM GDN decode 捕获可达(`tm_gated_delta_rule.py:316-321`)|合规(launch-only;`storage` 上限 2 + `reserve(2)` 无重分配悬空)|
-|`moe_gate_python_bind.cpp` moe_gate_v2|✅|✅|✅|✅|✅|⚠️ 仅 outs 缺省时分配|**test/bench-only**(自述 "Not a production API")|合规|
-|`linear_bind.cpp` fuse_weight/prepare_weight/get_exec_plan/tune/export/import、QuantizeSymm 系、LinkLinearExperts、invokeMoeDispatch/Combine|✅|✅|✅|✅|✅|✅|**加载期/调优期**(自述);QuantizeSymm 系/Dispatch/Combine 无包内调用者|合规(标注)|
-|`linear_bind.cpp` forward_dense/forward_moe 执行入口 + `turbomind/linear.py:431-540`|✅|✅|✅|✅|✅|✅|W4A16 前向,捕获可达|合规(`GetExecPlan` 纯 host 规划 `LlamaLinear.cu:306-348`;输出 `torch.empty_strided` 走图池;workspace 每流常驻 `linear.py:185-193`,warmup 预建)|
+| 审计单元                                                                                                                                     | P1  | P2  | P3            | P4                                       | P5  | P6                    | 生产可达性                                                            | 结论                                                                                                                                           |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | --- | --- | ------------- | ---------------------------------------- | --- | --------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bind.cpp` DLPack(from_dlpack/__dlpack__/reinterpret/t)                                                                                      | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | 引擎/加载期                                                           | 合规(纯元数据)                                                                                                                                 |
+| `bind.cpp` Tensor.copy_from(无 stream → safe_memcpy,同步)/copy_from(stream)                                                                  | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | 加载期(`turbomind/linear.py:242`、`builders/_base.py:110`)            | 合规(若被捕获链调用会 P4,现无此路径)                                                                                                           |
+| `bind.cpp` generic_copy_on_stream                                                                                                            | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | 无 python 调用者(legacy/bench)                                        | 合规                                                                                                                                           |
+| `bind.cpp` ContextGuard/create_device_context/Param/Module/TurboMind/ModelRequest                                                            | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | 引擎/加载期                                                           | 合规                                                                                                                                           |
+| `attn_bench_bind.cpp` attn_decode_bench                                                                                                      | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | **bench-only**                                                        | 合规(host `std::vector`→pageable H2D 有驱动暂存同步语义,非悬空)                                                                                |
+| `attn_bench_bind.cpp` tm_attn_decode(eager)                                                                                                  | ✅  | ✅  | ❌ `:209-210` | ✅                                       | ✅  | ✅                    | **eager decode**(图关/桶未命中)                                       | **违例,见 E1**                                                                                                                                 |
+| `attn_bench_bind.cpp` tm_attn_decode_graph(修后核对)                                                                                         | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | decode 图捕获+回放                                                    | **合规(缺陷①②③修复到位,见 §5)**                                                                                                                |
+| `attn_bench_bind.cpp` tm_process_kv                                                                                                          | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | 捕获安全(env 默认关;q_len=1 非法访问仍在查,`int8_kv.py:92-94`)        | 合规                                                                                                                                           |
+| `linear_attn/python_bind.cpp` delta_rule_plan                                                                                                | ✅  | ✅  | ✅            | ⚠️ 标注(`:222-225` chunked 模式同步 D2H) | ✅  | ✅                    | 规划期(warmup/step 构建,非捕获链)                                     | 合规                                                                                                                                           |
+| `linear_attn/python_bind.cpp` delta_rule_prepare_state_tma_descs / delta_rule_run                                                            | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | TM GDN decode 捕获可达(`tm_gated_delta_rule.py:316-321`)              | 合规(launch-only;`storage` 上限 2 + `reserve(2)` 无重分配悬空)                                                                                 |
+| `moe_gate_python_bind.cpp` moe_gate_v2                                                                                                       | ✅  | ✅  | ✅            | ✅                                       | ✅  | ⚠️ 仅 outs 缺省时分配 | **test/bench-only**(自述 "Not a production API")                      | 合规                                                                                                                                           |
+| `linear_bind.cpp` fuse_weight/prepare_weight/get_exec_plan/tune/export/import、QuantizeSymm 系、LinkLinearExperts、invokeMoeDispatch/Combine | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | **加载期/调优期**(自述);QuantizeSymm 系/Dispatch/Combine 无包内调用者 | 合规(标注)                                                                                                                                     |
+| `linear_bind.cpp` forward_dense/forward_moe 执行入口 + `turbomind/linear.py:431-540`                                                         | ✅  | ✅  | ✅            | ✅                                       | ✅  | ✅                    | W4A16 前向,捕获可达                                                   | 合规(`GetExecPlan` 纯 host 规划 `LlamaLinear.cu:306-348`;输出 `torch.empty_strided` 走图池;workspace 每流常驻 `linear.py:185-193`,warmup 预建) |
 
 ### 捕获可达 python 路径
 
-|审计单元|P1|P2|P3|P4|P5|P6|生产可达性|结论|
-|---|---|---|---|---|---|---|---|---|
-|`attention/int8_kv.py` 整体|✅|⚠️ W2|❌ E1(eager 支路)|✅|✅|✅|decode 图 + eager decode|**疑似+违例,见 E1/W2**|
-|`attention/default.py`|✅|✅|✅|✅|✅|✅|decode/prefill|合规(decode `max_q_seqlen=block_sparse_size` 常量 `:245-249`)|
-|`attention/fa3.py`|✅|✅|✅|✅|✅|✅|decode 图(调度元数据走常驻缓冲 `:203-242`)+ PCG eager boundary|合规(范式基线)|
-|`attention/mla.py`|✅|✅|✅|✅|✅|✅|decode 图 + PCG eager boundary(`:268-300`)|合规(范式基线;FlashMLA 1.x 经 `prepare_cudagraph_capture` 换新调度对象)|
-|`attention/sparse_mla.py`|✅|✅|✅|⚠️|❌ W1 `:47`|✅|decode 图(全图)+ PCG eager island|**疑似,见 W1**|
-|`attention/v4.py` + `v4_utils.py` + `cp.py`|✅|✅|✅|✅|✅|✅|decode 图/prefill PCG|合规("Safe upper bounds (no CUDA sync)" `v4.py:207-209`;DCP 集合通信可捕获)|
-|`gated_delta_rule.py`|✅|✅|✅|⚠️ W4 `:31-53`|✅|✅|decode(经 PCG eager boundary)+ prefill step 构建|合规(标注)|
-|`tm_gated_delta_rule.py`|✅|✅|✅|✅|✅|✅|GDN decode(捕获可达,env `gdn` 默认 auto)|合规(常驻 per-签名缓冲 + 设备写 ptrs 数组 `:36-100`;plan/entry 在 warmup 首步预建 `:326-360`;图 runner 保证 capture 前有 warmup `full_graph.py:97-101`)|
-|`kda.py` / `causal_conv1d.py`|✅|✅|✅|✅|✅|✅|decode/prefill(PCG eager boundary)|合规(全设备 where/gather/scatter)|
-|`moe/default.py`(Triton + DeepEP)|✅|✅|✅|✅|✅|✅|decode 图(LL)/prefill(normal 动态 dispatch 不可捕获,PCG fail-closed `compressed_tensors.py:138-141`)|合规|
-|`moe/blocked_fp8.py`|✅|✅|✅|✅|✅|✅|decode 图(LL)|合规(`:480` tolist 在 EPLB 更新期,非前向)|
-|`moe/compressed_tensors.py` / `static_fp8.py` / `w8a8.py` / `v4_fp4.py` / `ep_utils.py`|✅|✅|✅|✅|✅|✅|同上|合规(`expert_counts` 为 host shape dict `:182-196`)|
-|`kernels/cuda/moe/ep.py` fused_moe_v3|❌ W3 `:249-254`|✅|❌ W3|✅|✅|✅|**eager-only**(EP normal prefill/TBO)|**疑似,见 W3**|
-|`tm_moe_modules.py` / `tm_gemm_modules.py`|✅|✅|✅|⚠️ 标注(sync 仅加载/热更 `:65,:117,:135,:222`)|✅|✅|W4A16 捕获可达前向|合规(`blocked_route` 全设备;`Weight.is_graph_compatible` 已声明但无消费者,见 §4-S3)|
-|`awq_modules.py` / `blockedf8_modules.py` / `static_fp8_modules.py` / `qmodules.py` / `lora.py` / `moe_router.py`|✅|✅|✅|✅|✅|✅|捕获可达|合规(gluon/deepgemm warmup 预编译走 `warmup_manager.py`)|
-|`nsa.py`|✅|✅|✅|✅|✅|✅|decode 图 + PCG|合规(范式基线)|
-|`step_metadata.py`|✅|✅|✅|✅|✅|✅|每步 buffer 填充(捕获外)|合规(范式框架)|
-|`kernels/cuda/fill_kv_cache.py` / `copy_cache.py` / `step_metadata/*`|✅|✅|✅|✅|✅|✅|捕获可达|合规(全 triton,无 host sync;grep 全 kernel 目录无 `.item/.cpu/.tolist/.nonzero/synchronize` 命中)|
-|`models/utils/cudagraph.py`|✅|✅|✅|✅|✅|✅|图 runner 核心|合规(`fill_graph_common_inputs` 设备回填 `:205-219`;FA3 legacy 每步重建后 `copy_` 入常驻缓冲 `:249-276`)|
-|`comm/symm_mem_allgather.py`|✅|✅|✅|⚠️ 标注(`prepare/release` 捕获中显式 raise `:65,:158-160`)|✅|✅|decode 图|合规(未见形状捕获期自动回退 NCCL `:155-156`)|
+| 审计单元                                                                                                          | P1               | P2    | P3                | P4                                                         | P5          | P6  | 生产可达性                                                                                           | 结论                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------------------------------- | ---------------- | ----- | ----------------- | ---------------------------------------------------------- | ----------- | --- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `attention/int8_kv.py` 整体                                                                                       | ✅               | ⚠️ W2 | ❌ E1(eager 支路) | ✅                                                         | ✅          | ✅  | decode 图 + eager decode                                                                             | **疑似+违例,见 E1/W2**                                                                                                                                  |
+| `attention/default.py`                                                                                            | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode/prefill                                                                                       | 合规(decode `max_q_seqlen=block_sparse_size` 常量 `:245-249`)                                                                                           |
+| `attention/fa3.py`                                                                                                | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode 图(调度元数据走常驻缓冲 `:203-242`)+ PCG eager boundary                                       | 合规(范式基线)                                                                                                                                          |
+| `attention/mla.py`                                                                                                | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode 图 + PCG eager boundary(`:268-300`)                                                           | 合规(范式基线;FlashMLA 1.x 经 `prepare_cudagraph_capture` 换新调度对象)                                                                                 |
+| `attention/sparse_mla.py`                                                                                         | ✅               | ✅    | ✅                | ⚠️                                                         | ❌ W1 `:47` | ✅  | decode 图(全图)+ PCG eager island                                                                    | **疑似,见 W1**                                                                                                                                          |
+| `attention/v4.py` + `v4_utils.py` + `cp.py`                                                                       | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode 图/prefill PCG                                                                                | 合规("Safe upper bounds (no CUDA sync)" `v4.py:207-209`;DCP 集合通信可捕获)                                                                             |
+| `gated_delta_rule.py`                                                                                             | ✅               | ✅    | ✅                | ⚠️ W4 `:31-53`                                             | ✅          | ✅  | decode(经 PCG eager boundary)+ prefill step 构建                                                     | 合规(标注)                                                                                                                                              |
+| `tm_gated_delta_rule.py`                                                                                          | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | GDN decode(捕获可达,env `gdn` 默认 auto)                                                             | 合规(常驻 per-签名缓冲 + 设备写 ptrs 数组 `:36-100`;plan/entry 在 warmup 首步预建 `:326-360`;图 runner 保证 capture 前有 warmup `full_graph.py:97-101`) |
+| `kda.py` / `causal_conv1d.py`                                                                                     | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode/prefill(PCG eager boundary)                                                                   | 合规(全设备 where/gather/scatter)                                                                                                                       |
+| `moe/default.py`(Triton + DeepEP)                                                                                 | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode 图(LL)/prefill(normal 动态 dispatch 不可捕获,PCG fail-closed `compressed_tensors.py:138-141`) | 合规                                                                                                                                                    |
+| `moe/blocked_fp8.py`                                                                                              | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode 图(LL)                                                                                        | 合规(`:480` tolist 在 EPLB 更新期,非前向)                                                                                                               |
+| `moe/compressed_tensors.py` / `static_fp8.py` / `w8a8.py` / `v4_fp4.py` / `ep_utils.py`                           | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | 同上                                                                                                 | 合规(`expert_counts` 为 host shape dict `:182-196`)                                                                                                     |
+| `kernels/cuda/moe/ep.py` fused_moe_v3                                                                             | ❌ W3 `:249-254` | ✅    | ❌ W3             | ✅                                                         | ✅          | ✅  | **eager-only**(EP normal prefill/TBO)                                                                | **疑似,见 W3**                                                                                                                                          |
+| `tm_moe_modules.py` / `tm_gemm_modules.py`                                                                        | ✅               | ✅    | ✅                | ⚠️ 标注(sync 仅加载/热更 `:65,:117,:135,:222`)             | ✅          | ✅  | W4A16 捕获可达前向                                                                                   | 合规(`blocked_route` 全设备;`Weight.is_graph_compatible` 已声明但无消费者,见 §4-S3)                                                                     |
+| `awq_modules.py` / `blockedf8_modules.py` / `static_fp8_modules.py` / `qmodules.py` / `lora.py` / `moe_router.py` | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | 捕获可达                                                                                             | 合规(gluon/deepgemm warmup 预编译走 `warmup_manager.py`)                                                                                                |
+| `nsa.py`                                                                                                          | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | decode 图 + PCG                                                                                      | 合规(范式基线)                                                                                                                                          |
+| `step_metadata.py`                                                                                                | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | 每步 buffer 填充(捕获外)                                                                             | 合规(范式框架)                                                                                                                                          |
+| `kernels/cuda/fill_kv_cache.py` / `copy_cache.py` / `step_metadata/*`                                             | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | 捕获可达                                                                                             | 合规(全 triton,无 host sync;grep 全 kernel 目录无 `.item/.cpu/.tolist/.nonzero/synchronize` 命中)                                                       |
+| `models/utils/cudagraph.py`                                                                                       | ✅               | ✅    | ✅                | ✅                                                         | ✅          | ✅  | 图 runner 核心                                                                                       | 合规(`fill_graph_common_inputs` 设备回填 `:205-219`;FA3 legacy 每步重建后 `copy_` 入常驻缓冲 `:249-276`)                                                |
+| `comm/symm_mem_allgather.py`                                                                                      | ✅               | ✅    | ✅                | ⚠️ 标注(`prepare/release` 捕获中显式 raise `:65,:158-160`) | ✅          | ✅  | decode 图                                                                                            | 合规(未见形状捕获期自动回退 NCCL `:155-156`)                                                                                                            |
 
 **模型层补充**(全库 sync 模式 grep 核对):`deepseek_v2.py:201,244-245`、`glm5_next.py:1080-1081` 的 `.tolist()` 均在 DLEP microbatch / CPU fallback 支路,`enable_microbatch` 与 PCG 互斥(`standard.py:70-71`)→ eager-only ✅;`inputs_maker.py:1339` `kv_seqlens.max().item()` 在步输入构建期(捕获外)✅;`logits_process.py:54` 布尔掩码写在采样期(图外)✅;VLM 输入处理各命中均 eager prefill ✅。
 
----
+______________________________________________________________________
 
 ## 2. 违例/疑似逐项详述
 
-### E1(❌ P3 家族残留)tm_attn_decode eager 入口统一烘焙 ko[i]=i·max_k_len
+### E1(❌ P3 家族残留)tm_attn_decode eager 入口统一烘焙 ko\[i\]=i·max_k_len
+
 - **位置**:`src/turbomind/python/attn_bench_bind.cpp:209-210`(`BuildDecodePlan`,`cu_q_len_arg/cu_k_len_arg` 均传 nullptr);调用方 `lmdeploy/pytorch/backends/cuda/attention/int8_kv.py:255-293`(eager 分支仍走 `tm_attn_decode`,`max_k_len=attn_metadata.max_kv_seqlen`)。
 - **机制**:kernel 每序列 `context_len = cu_k_len[b+1]-cu_k_len[b]`(`attention_universal.h:398`)。烘焙后每个序列的 context_len 都被置为 batch 最大值:① 短序列按 max_k_len 逐块回退迭代 `block_ptrs[cu_block_nums[b]+id]`,越界块读到 `block_offsets` padding 列(池块 0)= 其他序列的 KV,softmax 混入垃圾键;② `kProcessKV` 把新 token 重写到 `ti=history_len=max_k_len-1` 而非真实 history 位 → 真实槽位未写入,token 从缓存**永久丢失**,池尾部被污染。
 - **图内触发最小条件**:无(捕获不可达;capture 已切换 `tm_attn_decode_graph`)。**eager 触发条件**:TM int8 KV 开启 + 单 token decode + batch 内 kv 长度不齐 + 该步未命中已捕获桶或 `enable_cudagraph=False`。测试只覆盖了等长 batch(`tests/pytorch/kernel/test_tm_int8_kv.py:206` `_cu([_block_offsets().shape[1]] * BATCH)`)故未暴露。
 
 ### W1(⚠️ P5)sparse_mla 索引映射布尔掩码写
+
 - **位置**:`lmdeploy/pytorch/backends/cuda/attention/sparse_mla.py:47` `mapped_indices[indices < 0] = -1`(`_map_decode_impl`,decode 索引映射)。
 - **机制**:eager bool-mask `__setitem__` 内部经 nonzero → D2H 同步,捕获下即 `cudaStreamCaptureInvalidated`。缓解:`_try_dynamic_compile`(`:19-25`)先经 `torch.compile(dynamic=True)` 包裹,inductor 会把掩码赋值降级为无同步的 scatter;已编译句柄按布局键缓存(`:65-73`)。
 - **图内触发最小条件**:decode **全图**捕获(非 PCG;PCG 下 `FlashMLASparseImpl` 走 eager island)且 `torch.compile` 静默失败回退 eager(`:24` except 返回原函数)且当步 indices 含 -1(padding 或 DSA 无效项)。对照:prefill 同类映射用 `torch.where`(`:110`)+ F.pad,合规。
 
 ### W2(⚠️ P2 邻域)int8_kv 图状态单槽替换
+
 - **位置**:`int8_kv.py:150-176` `_graph_state`:`self._tm_graph_state` 是单槽,key 不匹配即整体替换(`cu_q_len/cu_k_len/workspace`)。
 - **机制**:每个捕获形状的图把 workspace 地址固化进图节点。形状 A、B 两个 decode 图先后捕获时,B 的捕获会替换槽 → A 的旧缓冲引用被丢弃(私有池在 A 存活期保留数据,通常无即时损坏;但 A 重捕获或复杂替换序列下,A 的 replay 会对已释放/复用内存读写)。
 - **图内触发最小条件**:同一 impl 实例上 ≥2 个不同 `(num_seqs,…)` 形状的 decode 图共存,且后捕获图替换状态后旧图 replay/重捕获。
 
 ### W3(⚠️ P1/P3 形态,当前 eager-only)fused_moe_v3 host 列表 H2D
+
 - **位置**:`lmdeploy/pytorch/kernels/cuda/moe/ep.py:249-254`:`torch.tensor(num_recv_tokens_per_expert, pin_memory=True, device='cpu').cuda(non_blocking=True)`(`num_recv_tokens_per_expert` 为 DeepEP normal dispatch 返回的 **host list**)。
 - **机制**:若该 H2D 被捕获:源 pinned 暂存地址固化(P1,replay 重读该缓冲)+ 每步 expert counts 冻结为捕获值(P3)。当前不可达:仅 `FusedMoENormal`(EP normal prefill)与 TBO 异步管线调用;DeepEP normal 动态 dispatch 已显式 fail-closed(`compressed_tensors.py:138-141`),decode 走 LL masked 路径不经此函数。
 - **图内触发最小条件**:将 normal EP 路径纳入图捕获(未来改造时)。
 
 ### W4(⚠️ 标注,P4 设计内)fla chunk 索引 host sync
+
 - **位置**:`gated_delta_rule.py:31-53`(`prepare_chunked_gated_delta_rule`,注释自认 "forces a stream synchronization");经 `GatedDeltaStepMetaUpdater.update` 仅在 **非 decoding** 步调用(`:73-77`)→ prefill step 构建期,在捕获链外。
 
----
+______________________________________________________________________
 
 ## 3. 生产可达性分级
 
-| 级别 | 单元 |
-|---|---|
-| **decode 图路径**(捕获+回放) | `tm_attn_decode_graph` ✅、`tm_process_kv`(env 开启时 fill)✅、FA3/FlashMLA/NSA/V4/DSA builder ✅、TM GDN decode ✅、TM linear/MoE 前向 ✅、Triton 默认 attention/MoE ✅、DeepEP-LL ✅;**W1、W2 为该级疑似** |
-| **prefill 图路径**(PCG,eager island 包裹动态算子) | Triton/FlashMLA/NSA/GDN/conv eager boundary ✅;DeepEP normal fail-closed ✅;`prepare_chunked_gated_delta_rule` host sync 在 step 构建(岛外)✅ |
-| **eager-only** | **E1(tm_attn_decode)**、fused_moe_v3(W3)、DLEP `.tolist()` 支路、logits 采样、步输入构建 `.max().item()` |
-| **加载期/热更期** | linear_bind 全部 weight 入口、QuantizeSymm 系、`tm_gemm/tm_moe_modules._release` sync、`tm_weight_release`、EPLB `phy2log.tolist` |
-| **bench/test-only** | `attn_decode_bench`、`moe_gate_v2`、`delta_rule_plan` 测试探针、无调用者的 QuantizeSymm 系/invokeMoeDispatch/invokeMoeCombine/generic_copy_on_stream |
+| 级别                                              | 单元                                                                                                                                                                                                         |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **decode 图路径**(捕获+回放)                      | `tm_attn_decode_graph` ✅、`tm_process_kv`(env 开启时 fill)✅、FA3/FlashMLA/NSA/V4/DSA builder ✅、TM GDN decode ✅、TM linear/MoE 前向 ✅、Triton 默认 attention/MoE ✅、DeepEP-LL ✅;**W1、W2 为该级疑似** |
+| **prefill 图路径**(PCG,eager island 包裹动态算子) | Triton/FlashMLA/NSA/GDN/conv eager boundary ✅;DeepEP normal fail-closed ✅;`prepare_chunked_gated_delta_rule` host sync 在 step 构建(岛外)✅                                                                |
+| **eager-only**                                    | **E1(tm_attn_decode)**、fused_moe_v3(W3)、DLEP `.tolist()` 支路、logits 采样、步输入构建 `.max().item()`                                                                                                     |
+| **加载期/热更期**                                 | linear_bind 全部 weight 入口、QuantizeSymm 系、`tm_gemm/tm_moe_modules._release` sync、`tm_weight_release`、EPLB `phy2log.tolist`                                                                            |
+| **bench/test-only**                               | `attn_decode_bench`、`moe_gate_v2`、`delta_rule_plan` 测试探针、无调用者的 QuantizeSymm 系/invokeMoeDispatch/invokeMoeCombine/generic_copy_on_stream                                                         |
 
----
+______________________________________________________________________
 
 ## 4. 修复建议清单(S→L)
 
-1. **[S] W2**:`int8_kv.py:_graph_state` 改为 `dict[key, state]`(按捕获形状持久保存),禁止替换既有图的状态;并在 `reset`/图生命周期结束时成对释放。
-2. **[S] W1**:`sparse_mla.py:47` 改为 `torch.where(indices < 0, -1, mapped_indices)`(与 prefill 支路 `:110` 同范式),消除对 torch.compile 成功的隐式依赖。
-3. **[S] 声明门控**:`Weight.is_graph_compatible`(`linear.py:113-115`)在 TM linear/MoE 选择进捕获路径前消费(fail-closed),避免未来非图兼容家族混入。
-4. **[M] E1**:为 `tm_attn_decode` 补 `cu_q_len_addr/cu_k_len_addr`(或直接让 eager 分支复用 `tm_attn_decode_graph` 的常驻 cu 缓冲),python 侧传 `torch.cumsum(kv_seqlens)` 设备数组,消除 `qo/ko` 烘焙(`attn_bench_bind.cpp:209-210`);过渡期可 gate 到"batch 等长"。
-5. **[M] W3**:`fused_moe_v3` 的 expert counts 改为设备端产生(dispatch 落在设备张量)或保持显式 `assert not torch.cuda.is_current_stream_capturing()` 防御线,防止未来入图。
-6. **[L]** `tm_process_kv` q_len=1 非法访问(已知,`int8_kv.py:92-94`)与 TM bridge 默认开启前,补异构长度多批次的 S1 用例(现测全等长);将 DecodeWorkspaceLayout 语义写进 `graph_runner/README.md`。
+1. **\[S\] W2**:`int8_kv.py:_graph_state` 改为 `dict[key, state]`(按捕获形状持久保存),禁止替换既有图的状态;并在 `reset`/图生命周期结束时成对释放。
+2. **\[S\] W1**:`sparse_mla.py:47` 改为 `torch.where(indices < 0, -1, mapped_indices)`(与 prefill 支路 `:110` 同范式),消除对 torch.compile 成功的隐式依赖。
+3. **\[S\] 声明门控**:`Weight.is_graph_compatible`(`linear.py:113-115`)在 TM linear/MoE 选择进捕获路径前消费(fail-closed),避免未来非图兼容家族混入。
+4. **\[M\] E1**:为 `tm_attn_decode` 补 `cu_q_len_addr/cu_k_len_addr`(或直接让 eager 分支复用 `tm_attn_decode_graph` 的常驻 cu 缓冲),python 侧传 `torch.cumsum(kv_seqlens)` 设备数组,消除 `qo/ko` 烘焙(`attn_bench_bind.cpp:209-210`);过渡期可 gate 到"batch 等长"。
+5. **\[M\] W3**:`fused_moe_v3` 的 expert counts 改为设备端产生(dispatch 落在设备张量)或保持显式 `assert not torch.cuda.is_current_stream_capturing()` 防御线,防止未来入图。
+6. **\[L\]** `tm_process_kv` q_len=1 非法访问(已知,`int8_kv.py:92-94`)与 TM bridge 默认开启前,补异构长度多批次的 S1 用例(现测全等长);将 DecodeWorkspaceLayout 语义写进 `graph_runner/README.md`。
 
----
+______________________________________________________________________
 
 ## 5. 与已修三缺陷的模式对照
 
 三缺陷均属"捕获固化 host 视角状态"同一根因家族,修后核对(基于 `attn_bench_bind.cpp:329-560` 与 `int8_kv.py:150-260`):
 
-| 缺陷 | 原模式 | 修后机制 | 核对结果 |
-|---|---|---|---|
-| ① 栈上 H2D 烘焙 | P1 | 图入口零 host 栈源:qkv 融合改为 D2D `cudaMemcpy2DAsync` 写入常驻 workspace(`:368-386`);`finished/readonly_block_num/split_cnt` 改为捕获的 memset 节点(`:399-402,:418-421`) | ✅ 消除 |
-| ② 捕获区内分配/释放 | P2+P6 | `DecodeWorkspaceLayout`(`:67-110`)单一 caller-owned 常驻字节缓冲(256B 对齐,python 侧 `tm_decode_workspace_bytes` 同构),`DispatchDecodeGraph` 零 alloc/free 节点;注释记录原症状("8 free / 0 alloc nodes, replay consume freed memory") | ✅ 消除(残留 W2 单槽生命周期隐患) |
-| ③ host 烘焙长度 | P3 | `cu_q_len/cu_k_len` 为常驻设备缓冲,捕获的 `cumsum/copy_` 每步重写(`int8_kv.py:195-199`);kernel 运行时读 `cu_k_len`(`attention_universal.h:398`);`max_k_len` 仅作冻结容量上界 | ✅ 图路径消除;**eager 路径未跟进 → 即本报告 E1,同一根因家族的直接残留** |
+| 缺陷                | 原模式 | 修后机制                                                                                                                                                                                                                              | 核对结果                                                                |
+| ------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| ① 栈上 H2D 烘焙     | P1     | 图入口零 host 栈源:qkv 融合改为 D2D `cudaMemcpy2DAsync` 写入常驻 workspace(`:368-386`);`finished/readonly_block_num/split_cnt` 改为捕获的 memset 节点(`:399-402,:418-421`)                                                            | ✅ 消除                                                                 |
+| ② 捕获区内分配/释放 | P2+P6  | `DecodeWorkspaceLayout`(`:67-110`)单一 caller-owned 常驻字节缓冲(256B 对齐,python 侧 `tm_decode_workspace_bytes` 同构),`DispatchDecodeGraph` 零 alloc/free 节点;注释记录原症状("8 free / 0 alloc nodes, replay consume freed memory") | ✅ 消除(残留 W2 单槽生命周期隐患)                                       |
+| ③ host 烘焙长度     | P3     | `cu_q_len/cu_k_len` 为常驻设备缓冲,捕获的 `cumsum/copy_` 每步重写(`int8_kv.py:195-199`);kernel 运行时读 `cu_k_len`(`attention_universal.h:398`);`max_k_len` 仅作冻结容量上界                                                          | ✅ 图路径消除;**eager 路径未跟进 → 即本报告 E1,同一根因家族的直接残留** |
 
 E1 与缺陷③同族同根因(host 常量替代 per-step device 值);W1 与 `fill_kv_cache_tm` 已修的 P5 同族(布尔掩码 → nonzero 同步),但该处已有 compile 降级这道不设防的缓冲。除上述 E1/W1/W2/W3 外,审计范围内未发现同类问题。
