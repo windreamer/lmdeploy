@@ -13,8 +13,7 @@ Copyright (c) OpenMMLab. All rights reserved.
 1. **复现**:decode 步形状(B=4, q_len=1, kv=193, H=8, D=128, S=64)经
    `common.py bridge_fill` 稳定崩溃,报错点 `kv_cache_utils_v2.cu:306`
    (launch 后的 `TM_CUDA_CHECK(cudaGetLastError())`,异步错误在此浮现)。
-2. **fault 定位**(compute-sanitizer memcheck):`Invalid __global__ write of
-   size 8 bytes ... misaligned` at `kv_cache_utils_v2.cu:191`(`Store(&k_cache[di])`),
+2. **fault 定位**(compute-sanitizer memcheck):`Invalid __global__ write of size 8 bytes ... misaligned` at `kv_cache_utils_v2.cu:191`(`Store(&k_cache[di])`),
    经 `block.h:111`(`block = block_ptrs[block_id]`),仅 batch 3(block z=3)出错。
 3. **kernel 本身无缺陷**:同源码独立编译(driver + cudaMalloc + 阻塞 memcpy,
    `tm_write_repro/kernel_dbg.cu` 的 `main()`),参数全部正确读入

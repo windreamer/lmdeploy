@@ -594,4 +594,3 @@ INSTANTIATE_invokeFlattenKV_v2(nv_bfloat16);
 #endif
 
 }  // namespace turbomind
-

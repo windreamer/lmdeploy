@@ -20,7 +20,7 @@ import sys
 
 import torch
 
-sys.path.insert(0, "/data/windreamer/codebase/lmdeploy/benchmark/b304_graph_reverify")
+sys.path.insert(0, '/data/windreamer/codebase/lmdeploy/benchmark/b304_graph_reverify')
 
 from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
 from lmdeploy.turbomind import _tm
@@ -70,10 +70,10 @@ def main():
     print(f"INT32 OK, bases {base.tolist()}")
     try:
         dispatch(cu_int64([1] * B), cu_int64([KLEN] * B))
-        print("INT64: no crash (layout luck) -- still miswritten, see bench collateral check")
+        print('INT64: no crash (layout luck) -- still miswritten, see bench collateral check')
     except RuntimeError as e:
         print(f"INT64 CRASH: {str(e)[:120]}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -75,7 +75,8 @@ def alloc_pool(nb):
 
 
 def identity_table(bsz, cols, pool):
-    """Sequence-major `char*` table: entry = pool base + block_id * block_bytes."""
+    """Sequence-major `char*` table: entry = pool base + block_id *
+    block_bytes."""
     boff = (torch.arange(bsz, device='cuda')[:, None] * cols +
             torch.arange(cols, device='cuda')[None, :]).int()
     ptrs = boff.reshape(-1).to(torch.int64) * block_bytes() + pool.data_ptr()
@@ -84,10 +85,10 @@ def identity_table(bsz, cols, pool):
 
 
 def make_cu(vals):
-    """int32 cumulative array [0, v0, v0+v1, ...] on device.
+    """Int32 cumulative array [0, v0, v0+v1, ...] on device.
 
-    torch.cumsum promotes int32 to int64; ProcessKV_v2 takes `const int*`.
-    Keep the whole chain int32 (device fill, no cumsum needed).
+    torch.cumsum promotes int32 to int64; ProcessKV_v2 takes `const int*`. Keep the whole chain int32 (device fill, no
+    cumsum needed).
     """
     out = torch.zeros(len(vals) + 1, dtype=torch.int32)
     acc = 0
@@ -105,7 +106,7 @@ def make_kv(seed, bsz, kv_len):
 
 
 def quant_scale_min(x):
-    """fp32 per-token-per-head (scale, min), round-half-even codes."""
+    """Fp32 per-token-per-head (scale, min), round-half-even codes."""
     xf = x.float()
     lo = xf.amin(-1, keepdim=True)
     scale = ((xf.amax(-1, keepdim=True) - lo) / 255.0).clamp(min=1e-6)
@@ -128,7 +129,8 @@ def tm_write(k_rows, v_rows, cu_q, cu_k, base, max_q_len, ptrs):
 
 
 def host_write(pool, base, k, v, ti0, ti1):
-    """fp32 reference straight into the pool under the (scale, min) contract."""
+    """Fp32 reference straight into the pool under the (scale, min)
+    contract."""
     bb = block_bytes()
     data = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
     for b in range(k.shape[0]):
@@ -148,7 +150,8 @@ def host_write(pool, base, k, v, ti0, ti1):
 
 
 class PtWriter:
-    """Triton INT8 writer into PT caches + zero->min transcription to TM pool."""
+    """Triton INT8 writer into PT caches + zero->min transcription to TM
+    pool."""
 
     def __init__(self, nb):
         self.kc = torch.zeros(nb, BLOCK_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.uint8, device='cuda')
