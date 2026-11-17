@@ -15,15 +15,15 @@
 
 ### 1.1 分配(indexed compact 主线,GLM-5.3/Qwen3.5 CUDA 唯一状态实现)
 
-| 环节 | 位置 | 内容 |
-|---|---|---|
-| 声明 | `lmdeploy/pytorch/configurations/glm5_next.py:278-307` | 4 个 spec:`GLM5_KDA_CONV_STATE` `(L, C, d_conv-1)` bf16、`GLM5_KDA_RECURRENT_STATE` `(L, H, K, V)` fp32、kpool tail×2(`store_cacheable=False, prefix_checkpoint=False`);`:285` `state_cache_is_indexed`(CUDA only) |
-| 声明 | `lmdeploy/pytorch/configurations/qwen3_5.py:69-91` | 环形(非 indexed)`(L, 1+spec, H, **V_dim, K_dim**)` vs indexed `(L, H, V, K)`——**V-first 写进形状声明** |
-| 规格 | `lmdeploy/pytorch/engine/cache_engine/schema.py:318-342` | `build_state_cache_tensor_specs` → `CacheTensorSpec`(+`LayerRowMap`) |
-| 容量 | `lmdeploy/pytorch/config.py:500-534` | `SSMStateCapacity`:A=M−B−S;`num_units = 1 + R×W + B + S`(W=bank width,AR=1/MTP=1+k,`:517-519`) |
-| 计划 | `lmdeploy/pytorch/engine/cache_engine/state.py:48-130` | `SSMStatePlan`:单复合 uint8 unit 池 + 请求私有 auxiliary 池;`PackedStateCacheLayout` 的 `transfer_ranges` 合并(`:108-127`);`StateCacheEngine.__init__`(`:104-155`)compact 路径 checkpoint_pools=unit 池 |
-| 物理 | `lmdeploy/pytorch/engine/cache_engine/layout.py:180-213` | `PackedStateCacheLayout`:池 `(num_caches, pool_bytes)` uint8,`entry_axis=0`(slot),view `[slots, *spec.shape]`;`:216-241` `ContiguousStateCacheLayout` |
-| 布局选择缝 | `lmdeploy/pytorch/backends/default/cache.py:111-113`(cuda 继承 `backends/cuda/cache.py`) | `build_state_layout` → 默认 `PackedStateCacheLayout`;**方案 A 布局类的插入点** |
+| 环节       | 位置                                                                                     | 内容                                                                                                                                                                                                               |
+| ---------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 声明       | `lmdeploy/pytorch/configurations/glm5_next.py:278-307`                                   | 4 个 spec:`GLM5_KDA_CONV_STATE` `(L, C, d_conv-1)` bf16、`GLM5_KDA_RECURRENT_STATE` `(L, H, K, V)` fp32、kpool tail×2(`store_cacheable=False, prefix_checkpoint=False`);`:285` `state_cache_is_indexed`(CUDA only) |
+| 声明       | `lmdeploy/pytorch/configurations/qwen3_5.py:69-91`                                       | 环形(非 indexed)`(L, 1+spec, H, **V_dim, K_dim**)` vs indexed `(L, H, V, K)`——**V-first 写进形状声明**                                                                                                             |
+| 规格       | `lmdeploy/pytorch/engine/cache_engine/schema.py:318-342`                                 | `build_state_cache_tensor_specs` → `CacheTensorSpec`(+`LayerRowMap`)                                                                                                                                               |
+| 容量       | `lmdeploy/pytorch/config.py:500-534`                                                     | `SSMStateCapacity`:A=M−B−S;`num_units = 1 + R×W + B + S`(W=bank width,AR=1/MTP=1+k,`:517-519`)                                                                                                                     |
+| 计划       | `lmdeploy/pytorch/engine/cache_engine/state.py:48-130`                                   | `SSMStatePlan`:单复合 uint8 unit 池 + 请求私有 auxiliary 池;`PackedStateCacheLayout` 的 `transfer_ranges` 合并(`:108-127`);`StateCacheEngine.__init__`(`:104-155`)compact 路径 checkpoint_pools=unit 池            |
+| 物理       | `lmdeploy/pytorch/engine/cache_engine/layout.py:180-213`                                 | `PackedStateCacheLayout`:池 `(num_caches, pool_bytes)` uint8,`entry_axis=0`(slot),view `[slots, *spec.shape]`;`:216-241` `ContiguousStateCacheLayout`                                                              |
+| 布局选择缝 | `lmdeploy/pytorch/backends/default/cache.py:111-113`(cuda 继承 `backends/cuda/cache.py`) | `build_state_layout` → 默认 `PackedStateCacheLayout`;**方案 A 布局类的插入点**                                                                                                                                     |
 
 ### 1.2 decode 读写
 
@@ -56,12 +56,12 @@
 
 ## 2. 两侧格式约定对照(方案 A 的核心事实)
 
-| | PT indexed 池(现状) | TM 复合格式(方案 A 目标) |
-|---|---|---|
-| 物理 | 每序列一行 packed uint8:`[conv][recurrent][kpool…]`,256B 对齐(`schema.py:20-29`) | per-(layer_group×head_group) block `[L_b×H_b×K×V]`,checkpoint 类复合 ObjectAllocator 注册(`src/turbomind/models/llama/GatedDeltaNetLayer.cc:149` 注册、`:176` `linear_state_offset`、`:332,342` part 解析;通道语义 `src/turbomind/engine/README.md:369-372`) |
-| recurrent 轴序 | **V-first** `[H, V, K]`(声明 `qwen3_5.py:78-83`;kernel `kernels/cuda/gated_delta_rule.py:705,738-747`) | **K-first** `[H, K, V]`,经 `state_ptrs[seq*ng + h/H_b]` 寻址(`engine/README.md:386`;`pre_sm90/recurrent.cu:26-58`) |
-| 寻址 | 单元 ID(`input/output_state_ids`)索引池行 | 设备端 `int64 state_ptrs [1,B,1]` 直指 slab(`benchmark/bench_gdn.py:49-52` 即此接口) |
-| gate 形态 | KDA:逐 key 通道 `g [B,T,HV,K]` + A_log/dt_bias 融合(`kda.py:325-328,354-361`) | per-head 标量 g(`delta_rule.h:69-99` gate/beta stride;`bench_gdn.py:31-37` 同形态);**linear_attn 全目录无 channelwise/dt_bias/a_log**(grep 零命中) |
+|                | PT indexed 池(现状)                                                                                    | TM 复合格式(方案 A 目标)                                                                                                                                                                                                                                     |
+| -------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 物理           | 每序列一行 packed uint8:`[conv][recurrent][kpool…]`,256B 对齐(`schema.py:20-29`)                       | per-(layer_group×head_group) block `[L_b×H_b×K×V]`,checkpoint 类复合 ObjectAllocator 注册(`src/turbomind/models/llama/GatedDeltaNetLayer.cc:149` 注册、`:176` `linear_state_offset`、`:332,342` part 解析;通道语义 `src/turbomind/engine/README.md:369-372`) |
+| recurrent 轴序 | **V-first** `[H, V, K]`(声明 `qwen3_5.py:78-83`;kernel `kernels/cuda/gated_delta_rule.py:705,738-747`) | **K-first** `[H, K, V]`,经 `state_ptrs[seq*ng + h/H_b]` 寻址(`engine/README.md:386`;`pre_sm90/recurrent.cu:26-58`)                                                                                                                                           |
+| 寻址           | 单元 ID(`input/output_state_ids`)索引池行                                                              | 设备端 `int64 state_ptrs [1,B,1]` 直指 slab(`benchmark/bench_gdn.py:49-52` 即此接口)                                                                                                                                                                         |
+| gate 形态      | KDA:逐 key 通道 `g [B,T,HV,K]` + A_log/dt_bias 融合(`kda.py:325-328,354-361`)                          | per-head 标量 g(`delta_rule.h:69-99` gate/beta stride;`bench_gdn.py:31-37` 同形态);**linear_attn 全目录无 channelwise/dt_bias/a_log**(grep 零命中)                                                                                                           |
 
 **要点**:GLM-5.3 线性层 = KDA(`models/glm5_next.py:724,733` `Kda()`,`:1331` `is_glm5_kda_layer`;模型几何 34 GDN + 11 MLA)。批 2 的 1.41–3.50×(`benchmark/gdn_results.json`)测的是标量 g 的 GDN recurrent,**不能直接外推到 KDA 通道衰减 decode**——这是两份 benchmark 结论都必须显式声明的前提缺口。
 
@@ -94,11 +94,11 @@
 
 ## 6. 三方案四维对比(调研问题 5)
 
-| 维度 | A. 常驻 TM 复合格式 | 零拷贝直读(TM vk 变体 + state_ptrs 指进 PT 池) | adapter 桥层(已回滚) |
-|---|---|---|---|
-| **热路径开销** | decode 0 桥(TM kernel K-first 原生);prefill 需 K-first 适配;MTP W>1 与 graph `state_ptrs` 为新增机制。**前提:TM kernel 补 channelwise/KDA** | 0 桥 0 格式变更;vk 转置变体惩罚已测 **0.90–1.31×**(B=32 反而 0.90),对 PT 净胜 1.41–3.62×;**同一 kernel 前提**;每步生成 ptr 数组(小算子) | 每步全量重排 + TMA 描述符,净 **−83%~−148%**(B=1→32),拷贝随 batch×层线性增长 |
-| **存储标准纯度** | 终态单一 TM 标准;迁移期双标准;PT kernel 生态(tilelang recurrent/KDA 融合门控)全部需要 K-first 变体,实际是"换标准"而非"存标准" | 池保持 PT indexed V-first 标准,checkpoint/PD/Store/spec/驱逐语义**零改动** | 池不变,运行时格式双轨 |
-| **工程量** | 大:布局类+复合寻址、TM kernel 补通道衰减+多 destination、ptr 数组管线、schema 指纹、graph 适配(数周-月级 `[INFERENCE]`) | 小:kernel 出状态访问转置变体(swap 两索引项)+ ptr 数组生成 + 旋钮(数天级 `[INFERENCE]`) | 中(已实现、已回滚) |
+| 维度             | A. 常驻 TM 复合格式                                                                                                                         | 零拷贝直读(TM vk 变体 + state_ptrs 指进 PT 池)                                                                                          | adapter 桥层(已回滚)                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| **热路径开销**   | decode 0 桥(TM kernel K-first 原生);prefill 需 K-first 适配;MTP W>1 与 graph `state_ptrs` 为新增机制。**前提:TM kernel 补 channelwise/KDA** | 0 桥 0 格式变更;vk 转置变体惩罚已测 **0.90–1.31×**(B=32 反而 0.90),对 PT 净胜 1.41–3.62×;**同一 kernel 前提**;每步生成 ptr 数组(小算子) | 每步全量重排 + TMA 描述符,净 **−83%~−148%**(B=1→32),拷贝随 batch×层线性增长 |
+| **存储标准纯度** | 终态单一 TM 标准;迁移期双标准;PT kernel 生态(tilelang recurrent/KDA 融合门控)全部需要 K-first 变体,实际是"换标准"而非"存标准"               | 池保持 PT indexed V-first 标准,checkpoint/PD/Store/spec/驱逐语义**零改动**                                                              | 池不变,运行时格式双轨                                                       |
+| **工程量**       | 大:布局类+复合寻址、TM kernel 补通道衰减+多 destination、ptr 数组管线、schema 指纹、graph 适配(数周-月级 `[INFERENCE]`)                     | 小:kernel 出状态访问转置变体(swap 两索引项)+ ptr 数组生成 + 旋钮(数天级 `[INFERENCE]`)                                                  | 中(已实现、已回滚)                                                          |
 
 ## 7. 决策耦合点(供与 `GdnZeroCopyBench` 合议)
 
