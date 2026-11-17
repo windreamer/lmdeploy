@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Paged attention that pairs the TM int8 decode kernel with the TM block
-pool.
+"""Paged attention that pairs the TM int8 decode kernel with the TM block pool.
 
 The pool follows the `block::Layout` int8 geometry (see
 `lmdeploy/pytorch/backends/tm_kv.py`). New KV tokens are appended by the TM
@@ -53,8 +52,8 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         return self._tm or None
 
     def _pool_geometry(self, k_cache: torch.Tensor) -> tuple[int, int, int, int, int]:
-        """(pool_base, block_bytes, block_len, num_kv_heads, head_dim) from
-        one layer's K codes view (num_blocks, S, Hkv, D)."""
+        """(pool_base, block_bytes, block_len, num_kv_heads, head_dim) from one
+        layer's K codes view (num_blocks, S, Hkv, D)."""
         block_len, num_kv_heads, head_dim = k_cache.shape[-3:]
         return k_cache.data_ptr(), k_cache.stride(0), block_len, num_kv_heads, head_dim
 
@@ -194,8 +193,8 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         inplace: bool = True,
         **kwargs,
     ) -> torch.Tensor:
-        """Fill the pool, then dispatch: TM decode for int8 single-token
-        steps, stock Triton paths everywhere else."""
+        """Fill the pool, then dispatch: TM decode for int8 single-token steps,
+        stock Triton paths everywhere else."""
         if _is_tm_int8_policy(attn_metadata.quant_policy):
             if key is not None and value is not None:
                 self._fill_kv_cache_impl(key, value, k_cache, v_cache, attn_metadata,

@@ -33,7 +33,7 @@ def make_data(seed=7):
 def write_pool(pool, kind, k, v):
     """Quantize per token per head and scatter into `kind` layout."""
     pool.fill_(0)
-    nb, stride = pool.shape[0], pool.shape[1]
+    nb = pool.shape[0]
     kd = pool[:, :SD].view(nb, NUM_KV_HEADS, BLOCK_LEN, HEAD_DIM)
     vd = pool[:, SD:2 * SD].view(nb, NUM_KV_HEADS, BLOCK_LEN, HEAD_DIM)
     kp = pool[:, 2 * SD:2 * SD + PSP].view(torch.bfloat16).view(nb, NUM_KV_HEADS, BLOCK_LEN, 2)

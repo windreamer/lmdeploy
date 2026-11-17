@@ -84,8 +84,8 @@ def tm_int8_kv_knob() -> str:
 def turbomind_int8_kv_reason(model_config, cache_config) -> str | None:
     """Return why the TM int8-KV route cannot serve this model, or None.
 
-    Pure geometry/availability probe shared by the attention build and the
-    cache plan so both sides always reach the same verdict.
+    Pure geometry/availability probe shared by the attention build and the cache plan so both sides always reach the
+    same verdict.
     """
     if cache_config.quant_policy != QuantPolicy.INT8:
         return f'quant_policy must be INT8, but got {cache_config.quant_policy}'
@@ -179,8 +179,8 @@ def tm_int8_kv_capability() -> bool | None:
 def tm_int8_kv_layout_requested(model_config, cache_config) -> bool:
     """Whether the KV pool must use the TM int8 block layout.
 
-    Requires the knob not off, the geometry probe passing, INT8 KV policy,
-    and at least one capable paged-attention build without any incapable one.
+    Requires the knob not off, the geometry probe passing, INT8 KV policy, and at least one capable paged-attention
+    build without any incapable one.
     """
     if tm_int8_kv_knob() == 'off':
         return False

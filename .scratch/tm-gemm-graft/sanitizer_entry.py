@@ -1,10 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """Small compute-sanitizer entry for the B3-04 int8-KV path.
 
-Exercises both writers into one pool (TM write kernel prefill append, then a
-triton-free ATen decode-step append), the TM decode dispatch, and the
-Triton paged-attention reader on the same pool. Shapes are minimal so the
-sanitizer overhead stays tolerable.
+Exercises both writers into one pool (TM write kernel prefill append, then a triton-free ATen decode-step append), the
+TM decode dispatch, and the Triton paged-attention reader on the same pool. Shapes are minimal so the sanitizer overhead
+stays tolerable.
 """
 
 import torch
@@ -76,6 +75,7 @@ readers(PREFILL)
 
 # writer 2: triton-free ATen convert+scatter, decode-step append (1 token)
 from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm
+
 codes_v = pool[:, :2 * HSD].view(NB, H, 2, S, D)
 params_v = pool[:, 2 * HSD:].view(torch.bfloat16).view(NB, H, 2, S, 2)
 k_codes = codes_v[:, :, 0].permute(0, 2, 1, 3)
