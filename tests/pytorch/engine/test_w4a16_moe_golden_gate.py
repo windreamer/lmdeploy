@@ -52,15 +52,18 @@ MOE_TINY_TOP1_THRESHOLD = 0.4
 def _seeded(key: str):
     """Deterministic per-key generator.
 
-    Python randomizes the str hash per process, so the seed derives from
-    crc32."""
+    Python randomizes the str hash per process, so the seed derives from crc32.
+    """
     gen = torch.Generator()
     gen.manual_seed(zlib.crc32(key.encode()) ^ 0x5EED)
     return gen
 
 
 def _quantized_triplet(name: str, w: torch.Tensor) -> dict[str, torch.Tensor]:
-    """ct group-128 triplet. The source already carries the outlier."""
+    """Ct group-128 triplet.
+
+    The source already carries the outlier.
+    """
     from lmdeploy.turbomind.ct_repack import quantize_ct
 
     packed, scale, zero = quantize_ct(w)
@@ -72,7 +75,10 @@ def _quantized_triplet(name: str, w: torch.Tensor) -> dict[str, torch.Tensor]:
 
 
 def _source_weights(vocab: int) -> dict[str, torch.Tensor]:
-    """The raw fp16 model both engines serve. Deterministic across runs."""
+    """The raw fp16 model both engines serve.
+
+    Deterministic across runs.
+    """
     gen = _seeded('moe-tiny-source')
     tensors = {
         'model.embed_tokens.weight': torch.randn(vocab, HIDDEN, generator=gen, dtype=torch.float16) * 0.02,
@@ -156,7 +162,10 @@ def _base_config(vocab: int, quantization_config: dict | None) -> dict:
 
 def _make_tiny_moe_pair(tmp_path, seed: int):
     """Write the quantized candidate and the unquantized twin of one seeded
-    source model. Returns ``(candidate_dir, twin_dir)``."""
+    source model.
+
+    Returns ``(candidate_dir, twin_dir)``.
+    """
     import shutil
 
     from safetensors.torch import save_file

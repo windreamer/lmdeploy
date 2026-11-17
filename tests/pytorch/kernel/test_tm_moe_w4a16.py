@@ -40,9 +40,8 @@ def _kl(first: torch.Tensor, second: torch.Tensor) -> float:
 def _quant_awq(w: torch.Tensor, group: int, device: torch.device):
     """Quantize [N, K] into the canonical AWQ triple plus the fp16 dequant.
 
-    The packing mirrors the AutoAWQ layout the loader produces (word per
-    input row, nibble order ``[0, 4, 1, 5, 2, 6, 3, 7]``), so the reference
-    dequant walks the same codes the kernel reads.
+    The packing mirrors the AutoAWQ layout the loader produces (word per input row, nibble order ``[0, 4, 1, 5, 2, 6, 3,
+    7]``), so the reference dequant walks the same codes the kernel reads.
     """
     n, k = w.shape
     groups = w.float().view(n, k // group, group)
@@ -81,8 +80,8 @@ class _ExpertSet:
         self.dequant = dequants
 
 def _fused_gate_up(gate: _ExpertSet, up: _ExpertSet):
-    """Assemble the fused gate/up storage: gate half first, up half
-    second, matching the loader convention the engine produces."""
+    """Assemble the fused gate/up storage: gate half first, up half second,
+    matching the loader convention the engine produces."""
     return (
         torch.cat((gate.qweight, up.qweight), dim=-1),
         torch.cat((gate.scales, up.scales), dim=-1),
@@ -116,8 +115,8 @@ def _reference(x, gate_deq, up_deq, down_deq, topk_ids, topk_weights, device):
 
 @pytest.fixture(scope='module')
 def s1_full_setup():
-    """Build the 288-expert GLM-5.3 sparse geometry once for the param
-    sweep, release the packed handles afterwards."""
+    """Build the 288-expert GLM-5.3 sparse geometry once for the param sweep,
+    release the packed handles afterwards."""
     num_experts, top_k, hidden, ffn, group = 288, 8, 4096, 2048, 128
     device = torch.device('cuda')
 
@@ -169,11 +168,9 @@ def test_s1_grouped_matches_elementwise_reference(num_tokens, s1_full_setup):
 def test_route_anchors_match_triton_fused_moe():
     """Same weights, same routing: TM grouped vs the two triton anchors.
 
-    The fp16 anchor isolates the quantization granularity (TM reads the g128
-    codes of the same source weights the triton kernel sees unquantized); the
-    packed anchor replays the batch 2 benchmark comparison at g32. The fused
-    branch joins when the device offers a gated-silu family (SM90), and the
-    case notes the capability skip otherwise.
+    The fp16 anchor isolates the quantization granularity (TM reads the g128 codes of the same source weights the triton
+    kernel sees unquantized); the packed anchor replays the batch 2 benchmark comparison at g32. The fused branch joins
+    when the device offers a gated-silu family (SM90), and the case notes the capability skip otherwise.
     """
     num_experts, top_k, hidden, ffn, group = 8, 4, 512, 256, 128
     device = torch.device('cuda')
@@ -275,9 +272,8 @@ def test_route_anchors_match_triton_fused_moe():
 def test_fused_silu_branch_when_family_supported():
     """Exercise the fused gate/up branch only where a family represents it.
 
-    SM86 exposes no gated-silu block (batch 2 verdict); the impl then packs
-    the separate w1/w3 handles. On devices with the fused family the branch
-    runs the same parity gate.
+    SM86 exposes no gated-silu block (batch 2 verdict); the impl then packs the separate w1/w3 handles. On devices with
+    the fused family the branch runs the same parity gate.
     """
     num_experts, top_k, hidden, ffn, group = 4, 2, 256, 128, 128
     device = torch.device('cuda')
@@ -318,7 +314,8 @@ def test_fused_silu_branch_when_family_supported():
 
 @torch.inference_mode()
 def test_blocked_route_semantics():
-    """The blocked slot layout matches the triton sorter and parks sentinels."""
+    """The blocked slot layout matches the triton sorter and parks
+    sentinels."""
     num_experts, top_k = 8, 4
     device = torch.device('cuda')
     torch.manual_seed(17)
@@ -373,10 +370,10 @@ def test_forward_requires_update_weights():
 
 
 def test_auto_route_falls_back_on_bf16(monkeypatch):
-    """auto reports the probe reason instead of raising.
+    """Auto reports the probe reason instead of raising.
 
-    The shape checks need CUDA, so this case runs only with a device
-    present."""
+    The shape checks need CUDA, so this case runs only with a device present.
+    """
     if not torch.cuda.is_available():
         pytest.skip('requires CUDA')
     import lmdeploy.pytorch.envs as envs
