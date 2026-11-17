@@ -46,6 +46,7 @@ exit=0。观测行:
 失败:`error: could not write index`——共享树的 git index 含 14 个 `AA`(both added)未合并条目,全部位于 `lmdeploy/serve/parsers/*`(他人进行中的 cherry-pick/rebase,非本票文件;无 MERGE_HEAD)。失败未产生任何 stash 条目、未改动任何文件(事后 `git diff --stat` 三文件为空确认)。
 
 **替代执行**(等效且不触碰共享 git 状态):
+
 1. `git show 45e9322c^:src/turbomind/python/attn_bench_bind.cpp` 落盘为 `attn_bench_bind.prefix.cpp`,其 sha256(前16位 `78ac4d41a2ef2f16`)与 `45e9322c^` 原文件逐字节一致;
 2. 手动将该内容替换进 `src/turbomind/python/attn_bench_bind.cpp`(HEAD 版份备份于 `attn_bench_bind.head.cpp`;T3 仅运行 repro 脚本,故只回退 binding 一个文件,操作单 stash 的另两个脚本不参与 T3);
 3. `cmake --build build --target _turbomind -j$(nproc)` → exit 0(19s,1 个 TU 重编 + 链接);
@@ -65,10 +66,10 @@ EXIT=0
 
 ## T4 sanitizer(`benchmark/b304_debug/sanitizer_entry_b304.py`,重建后运行)
 
-| 工具 | ERROR SUMMARY | exit | 明细 |
-| --- | --- | --- | --- |
-| initcheck | **0 errors** | 0 | 无 uninitialized 观测;脚本尾行 `SANITIZER ENTRY B304 DONE` |
-| memcheck | **4 errors** | 9(`--error-exitcode 9` 触发) | 4 条均为 **CUDA API 层** `cudaErrorInvalidValue`("invalid argument"):2× `cudaFuncSetAttribute` + 2× `cudaGetLastError`;调用栈同源:`registry.cu:29`(Registry 构造内的 lambda)← `Registry::instance()`(registry.cu:107)← `dispatchDecoding<__nv_bfloat16>`(decoding.cu:33)← `TmAttnDecode`(attn_bench_bind.cpp:421)。**无任何 device 侧访存错误**(无 invalid read/write、无 OOB) |
+| 工具      | ERROR SUMMARY | exit                         | 明细                                                                                                                                                                                                                                                                                                                                                                           |
+| --------- | ------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| initcheck | **0 errors**  | 0                            | 无 uninitialized 观测;脚本尾行 `SANITIZER ENTRY B304 DONE`                                                                                                                                                                                                                                                                                                                     |
+| memcheck  | **4 errors**  | 9(`--error-exitcode 9` 触发) | 4 条均为 **CUDA API 层** `cudaErrorInvalidValue`("invalid argument"):2× `cudaFuncSetAttribute` + 2× `cudaGetLastError`;调用栈同源:`registry.cu:29`(Registry 构造内的 lambda)← `Registry::instance()`(registry.cu:107)← `dispatchDecoding<__nv_bfloat16>`(decoding.cu:33)← `TmAttnDecode`(attn_bench_bind.cpp:421)。**无任何 device 侧访存错误**(无 invalid read/write、无 OOB) |
 
 原始输出:`T4_initcheck.out`(全文)、`T4_memcheck.out`(含完整栈)。
 
