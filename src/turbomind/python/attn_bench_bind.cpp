@@ -46,17 +46,26 @@ struct DecodePlan {
     core::Tensor_<bool>  finished;
     core::Tensor_<int>   cu_q_len;
     core::Tensor_<int>   cu_k_len;
+    core::Tensor_<int>   readonly_block_num;
     core::Tensor_<int>   split_cnt;
     core::Tensor_<float> partial_O;
     core::Tensor_<float> partial_ML;
 };
 
-// Fill `AttentionParams` the same way `UnifiedAttentionLayer` does. `q` is
-// [B, H*D] contiguous; K/V pointers stay valid but are never dereferenced by
-// the decoding path (KV comes from the block pool). Null `cu_q_len_arg` /
-// `cu_k_len_arg` fall back to the benchmark's constant per-sequence lengths.
+// Fill `AttentionParams` the same way `UnifiedAttentionLayer` does (decode
+// path, `CreateParams`). `q`/`k`/`v` are [B, H*D] / [B, Hkv*D] /
+// [B, Hkv*D] contiguous and must hold the caller's real values: the decoding
+// kernel (`attention_universal.h`, `kProcessKV`) re-stores the K/V rows
+// (rope'd, quantized) into the block pool at `ti = history_len` every
+// dispatch, so garbage in `k`/`v` is quantized and written into the pool's
+// last valid position. `readonly_block_num` is a valid zero buffer, mirroring
+// the production decode convention (`Scheduler::PlanContinue` sets it to 0).
+// Null `cu_q_len_arg` / `cu_k_len_arg` fall back to the benchmark's constant
+// per-sequence lengths.
 template<class T>
 DecodePlan<T> BuildDecodePlan(const core::Tensor& q,
+                              const core::Tensor& k,
+                              const core::Tensor& v,
                               core::Tensor&       out,
                               char**              block_ptrs,
                               const int*          cu_block_nums,
@@ -75,17 +84,40 @@ DecodePlan<T> BuildDecodePlan(const core::Tensor& q,
     AttentionParams<T>& params = plan.params;
 
     // Mirror the production layout: one fused [B, (H + 2Hkv) * D] qkv row per
-    // token; Q is copied in, K/V pointers stay valid but are never dereferenced
-    // by the decoding path (KV comes from the block pool).
-    plan.qkv = core::Tensor{{batch_size, (num_heads + 2 * num_kv_heads) * head_dim}, q.dtype(), q.device()};
-    TM_CUDA_CHECK(cudaMemcpy2DAsync(plan.qkv.raw_data(),
-                                    plan.qkv.stride(0) * sizeof(T),
-                                    q.raw_data(),
-                                    num_heads * head_dim * sizeof(T),
-                                    num_heads * head_dim * sizeof(T),
-                                    batch_size,
-                                    cudaMemcpyDeviceToDevice,
-                                    stream));
+    // token, with Q, K and V all populated from caller data (production points
+    // `params.k/v` into the real fused qkv GEMM output,
+    // `unified_attention_layer.cc` CreateParams). The K/V sections are
+    // dereferenced and re-stored into the block pool by the decoding kernel.
+    {
+        TM_CHECK_EQ(k.size(), (size_t)batch_size * num_kv_heads * head_dim) << "k must be [B, Hkv*D] contiguous";
+        TM_CHECK_EQ(v.size(), (size_t)batch_size * num_kv_heads * head_dim) << "v must be [B, Hkv*D] contiguous";
+        TM_CHECK_EQ(k.dtype(), q.dtype()) << "k dtype must match q";
+        TM_CHECK_EQ(v.dtype(), q.dtype()) << "v dtype must match q";
+
+        plan.qkv = core::Tensor{{batch_size, (num_heads + 2 * num_kv_heads) * head_dim}, q.dtype(), q.device()};
+        const size_t q_bytes   = num_heads * head_dim * sizeof(T);
+        const size_t kv_bytes  = num_kv_heads * head_dim * sizeof(T);
+        const size_t row_bytes = (num_heads + 2 * num_kv_heads) * head_dim * sizeof(T);
+        char*        qkv_base  = (char*)plan.qkv.raw_data();
+        TM_CUDA_CHECK(cudaMemcpy2DAsync(
+            qkv_base, row_bytes, q.raw_data(), q_bytes, q_bytes, batch_size, cudaMemcpyDeviceToDevice, stream));
+        TM_CUDA_CHECK(cudaMemcpy2DAsync(qkv_base + q_bytes,
+                                        row_bytes,
+                                        k.raw_data(),
+                                        kv_bytes,
+                                        kv_bytes,
+                                        batch_size,
+                                        cudaMemcpyDeviceToDevice,
+                                        stream));
+        TM_CUDA_CHECK(cudaMemcpy2DAsync(qkv_base + q_bytes + kv_bytes,
+                                        row_bytes,
+                                        v.raw_data(),
+                                        kv_bytes,
+                                        kv_bytes,
+                                        batch_size,
+                                        cudaMemcpyDeviceToDevice,
+                                        stream));
+    }
 
     params.out    = (T*)out.raw_data();
     params.q      = (T*)plan.qkv.raw_data();
@@ -103,11 +135,10 @@ DecodePlan<T> BuildDecodePlan(const core::Tensor& q,
                                                    0,  // cache_block_offset
                                                    block_len};
 
-    params.finished           = nullptr;
-    params.cu_q_len           = nullptr;
-    params.cu_k_len           = nullptr;
-    params.readonly_block_num = nullptr;
-    params.token_mask         = nullptr;
+    params.finished   = nullptr;
+    params.cu_q_len   = nullptr;
+    params.cu_k_len   = nullptr;
+    params.token_mask = nullptr;
 
     params.num_heads     = num_heads;
     params.num_kv_heads  = num_kv_heads;
@@ -121,9 +152,10 @@ DecodePlan<T> BuildDecodePlan(const core::Tensor& q,
 
     // Per-sequence lengths are either caller-provided device arrays or
     // benchmark constants built once on device.
-    plan.finished = core::Tensor_<bool>{{batch_size}, kDEVICE};
-    plan.cu_q_len = core::Tensor_<int>{{batch_size + 1}, kDEVICE};
-    plan.cu_k_len = core::Tensor_<int>{{batch_size + 1}, kDEVICE};
+    plan.finished           = core::Tensor_<bool>{{batch_size}, kDEVICE};
+    plan.cu_q_len           = core::Tensor_<int>{{batch_size + 1}, kDEVICE};
+    plan.cu_k_len           = core::Tensor_<int>{{batch_size + 1}, kDEVICE};
+    plan.readonly_block_num = core::Tensor_<int>{{batch_size}, kDEVICE};
     {
         std::vector<char> f(batch_size, 0);
         std::vector<int>  qo(batch_size + 1), ko(batch_size + 1);
@@ -132,6 +164,10 @@ DecodePlan<T> BuildDecodePlan(const core::Tensor& q,
             ko[i] = i * max_k_len;
         }
         TM_CUDA_CHECK(cudaMemcpyAsync(plan.finished.raw_data(), f.data(), f.size(), cudaMemcpyHostToDevice, stream));
+        // Decode always appends past the read-only prefix (production decode
+        // sets `readonly_block_num = 0`); a valid zero buffer keeps that
+        // contract explicit instead of relying on a null-pointer special case.
+        TM_CUDA_CHECK(cudaMemsetAsync(plan.readonly_block_num.raw_data(), 0, sizeof(int) * batch_size, stream));
         if (cu_q_len_arg == nullptr) {
             TM_CUDA_CHECK(cudaMemcpyAsync(
                 plan.cu_q_len.raw_data(), qo.data(), qo.size() * sizeof(int), cudaMemcpyHostToDevice, stream));
@@ -159,22 +195,25 @@ DecodePlan<T> BuildDecodePlan(const core::Tensor& q,
     plan.partial_ML = core::Tensor_<float>{{params.token_num, num_heads, max_split_k, 2}, kDEVICE};
     TM_CUDA_CHECK(cudaMemsetAsync(plan.split_cnt.raw_data(), 0, sizeof(int) * params.token_num, stream));
 
-    params.cu_q_len     = plan.cu_q_len.data();
-    params.cu_k_len     = plan.cu_k_len.data();
-    params.finished     = plan.finished.data();
-    params.split_cnt    = plan.split_cnt.data();
-    params.partial_ML   = plan.partial_ML.data();
-    params.partial_O    = plan.partial_O.data();
-    params.max_split_k  = max_split_k;
-    params.arch         = getSMVersion();
-    params.stream       = stream;
-    params.quant_policy = quant_policy;
+    params.cu_q_len           = plan.cu_q_len.data();
+    params.cu_k_len           = plan.cu_k_len.data();
+    params.readonly_block_num = plan.readonly_block_num.data();
+    params.finished           = plan.finished.data();
+    params.split_cnt          = plan.split_cnt.data();
+    params.partial_ML         = plan.partial_ML.data();
+    params.partial_O          = plan.partial_O.data();
+    params.max_split_k        = max_split_k;
+    params.arch               = getSMVersion();
+    params.stream             = stream;
+    params.quant_policy       = quant_policy;
 
     return plan;
 }
 
 template<class T>
 std::vector<float> RunDecodeBench(const core::Tensor& q,
+                                  const core::Tensor& k,
+                                  const core::Tensor& v,
                                   core::Tensor&       out,
                                   char**              block_ptrs,
                                   const int*          cu_block_nums,
@@ -190,6 +229,8 @@ std::vector<float> RunDecodeBench(const core::Tensor& q,
                                   cudaStream_t        stream)
 {
     DecodePlan<T> plan = BuildDecodePlan<T>(q,
+                                            k,
+                                            v,
                                             out,
                                             block_ptrs,
                                             cu_block_nums,
@@ -233,6 +274,8 @@ std::vector<float> RunDecodeBench(const core::Tensor& q,
 }
 
 py::list AttnDecodeBench(const std::shared_ptr<core::Tensor>& q,
+                         const std::shared_ptr<core::Tensor>& k,
+                         const std::shared_ptr<core::Tensor>& v,
                          std::shared_ptr<core::Tensor>        out,
                          std::uintptr_t                       block_ptrs_addr,
                          std::uintptr_t                       cu_block_nums_addr,
@@ -270,6 +313,8 @@ py::list AttnDecodeBench(const std::shared_ptr<core::Tensor>& q,
         py::gil_scoped_release release;
         if (q->dtype() == kBfloat16) {
             ms = RunDecodeBench<nv_bfloat16>(*q,
+                                             *k,
+                                             *v,
                                              out_t,
                                              block_ptrs,
                                              cu_block_nums,
@@ -286,6 +331,8 @@ py::list AttnDecodeBench(const std::shared_ptr<core::Tensor>& q,
         }
         else if (q->dtype() == kFloat16) {
             ms = RunDecodeBench<half>(*q,
+                                      *k,
+                                      *v,
                                       out_t,
                                       block_ptrs,
                                       cu_block_nums,
@@ -317,6 +364,8 @@ py::list AttnDecodeBench(const std::shared_ptr<core::Tensor>& q,
 // under CUDA graph capture (core allocations + TM_CHECK host logic); callers
 // fall back to the PyTorch read path when capturing.
 void TmAttnDecode(const std::shared_ptr<core::Tensor>& q,
+                  const std::shared_ptr<core::Tensor>& k,
+                  const std::shared_ptr<core::Tensor>& v,
                   std::shared_ptr<core::Tensor>        out,
                   std::uintptr_t                       block_ptrs_addr,
                   std::uintptr_t                       cu_block_nums_addr,
@@ -354,6 +403,8 @@ void TmAttnDecode(const std::shared_ptr<core::Tensor>& q,
     py::gil_scoped_release release;
     if (q->dtype() == kBfloat16) {
         DecodePlan<nv_bfloat16> plan = BuildDecodePlan<nv_bfloat16>(*q,
+                                                                    *k,
+                                                                    *v,
                                                                     *out,
                                                                     block_ptrs,
                                                                     cu_block_nums,
@@ -371,6 +422,8 @@ void TmAttnDecode(const std::shared_ptr<core::Tensor>& q,
     }
     else if (q->dtype() == kFloat16) {
         DecodePlan<half> plan = BuildDecodePlan<half>(*q,
+                                                      *k,
+                                                      *v,
                                                       *out,
                                                       block_ptrs,
                                                       cu_block_nums,
@@ -499,6 +552,8 @@ void bind_attn_bench(py::module_& m)
     m.def("attn_decode_bench",
           &AttnDecodeBench,
           "q"_a,
+          "k"_a,
+          "v"_a,
           "out"_a = py::none(),
           "block_ptrs_addr"_a,
           "cu_block_nums_addr"_a,
@@ -512,11 +567,16 @@ void bind_attn_bench(py::module_& m)
           "iters"_a      = 100,
           "warmup"_a     = 20,
           "stream_ptr"_a = std::uintptr_t{0},
-          "Timed decode-attention dispatch; returns per-iteration ms.");
+          "Timed decode-attention dispatch; returns per-iteration ms. `k`/`v` "
+          "[B, Hkv*D] are re-stored (quantized) into the pool's last valid "
+          "position each dispatch, mirroring production decode; pass the real "
+          "K/V rows of that position.");
 
     m.def("tm_attn_decode",
           &TmAttnDecode,
           "q"_a,
+          "k"_a,
+          "v"_a,
           "out"_a,
           "block_ptrs_addr"_a,
           "cu_block_nums_addr"_a,
@@ -528,7 +588,10 @@ void bind_attn_bench(py::module_& m)
           "max_k_len"_a,
           "kv_quant"_a   = 0,
           "stream_ptr"_a = std::uintptr_t{0},
-          "Single-shot decode-attention dispatch into `out`.");
+          "Single-shot decode-attention dispatch into `out`. `k`/`v` "
+          "[B, Hkv*D] must hold the real K/V rows of the newest token "
+          "(ti = k_len - 1): the kernel re-stores them (rope'd, quantized) "
+          "into the pool, mirroring production decode.");
 
     m.def("tm_process_kv",
           &TmProcessKV,

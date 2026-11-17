@@ -84,26 +84,41 @@ def build_tm_pool_bf16(k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 
 
 def build_tm_pool_int8(kc, ks, km, vc, vs, vm) -> torch.Tensor:
-    """TM int8 per-block layout: [K data][V data][K params][V params].
-
+    """TM int8 per-block layout (`block::Layout`, matches
+    `lmdeploy/pytorch/backends/tm_kv.py::TmInt8BlockCacheLayout`): per-head
+    [K data][V data] code pairs, then per-head [K params][V params] pairs.
     Param slots are 2 x bf16 (scale, zero=min) per token per head; codes are
     uint8 and dequant is code*scale + min.
     """
     nb, s, h, d = kc.shape
-    data_bytes = h * s * d
-    param_bytes = h * s * 4
-    pool = torch.empty(nb, 2 * data_bytes + 2 * param_bytes, dtype=torch.uint8, device=kc.device)
-    kd = pool[:, :data_bytes].view(nb, h, s, d)
-    vd = pool[:, data_bytes:2 * data_bytes].view(nb, h, s, d)
-    kp = pool[:, 2 * data_bytes:2 * data_bytes + param_bytes].view(torch.bfloat16).view(nb, h, s, 2)
-    vp = pool[:, 2 * data_bytes + param_bytes:].view(torch.bfloat16).view(nb, h, s, 2)
-    kd.copy_(kc.permute(0, 2, 1, 3))
-    vd.copy_(vc.permute(0, 2, 1, 3))
-    kp[..., 0] = ks.squeeze(-1).permute(0, 2, 1)
-    kp[..., 1] = km.squeeze(-1).permute(0, 2, 1)
-    vp[..., 0] = vs.squeeze(-1).permute(0, 2, 1)
-    vp[..., 1] = vm.squeeze(-1).permute(0, 2, 1)
+    data_bytes = 2 * h * s * d
+    param_bytes = 2 * h * s * 4
+    pool = torch.empty(nb, data_bytes + param_bytes, dtype=torch.uint8, device=kc.device)
+    codes = pool[:, :data_bytes].view(nb, h, 2, s, d)
+    params = pool[:, data_bytes:].view(torch.bfloat16).view(nb, h, 2, s, 2)
+    codes[:, :, 0] = kc.permute(0, 2, 1, 3)
+    codes[:, :, 1] = vc.permute(0, 2, 1, 3)
+    params[:, :, 0, :, 0] = ks.squeeze(-1).permute(0, 2, 1)
+    params[:, :, 0, :, 1] = km.squeeze(-1).permute(0, 2, 1)
+    params[:, :, 1, :, 0] = vs.squeeze(-1).permute(0, 2, 1)
+    params[:, :, 1, :, 1] = vm.squeeze(-1).permute(0, 2, 1)
     return pool
+
+
+def last_token_kv(k, v, bsz, klen):
+    """K/V rows of each sequence's newest token, flattened [B, Hkv*D].
+
+    `k`/`v` are the pre-quant source pools [nb, S, Hkv, D] in sequence-major
+    block order. The TM decode kernel re-stores exactly these rows (rope'd,
+    quantized) into the pool at ti = klen - 1 every dispatch
+    (`attention_universal.h` kProcessKV), so the binding must be given the
+    real values — garbage gets quantized into the pool's last valid position.
+    """
+    off = klen - 1
+    blk = torch.arange(bsz, device=k.device) * ((klen + BLOCK_LEN - 1) // BLOCK_LEN) + off // BLOCK_LEN
+    kl = k[blk, off % BLOCK_LEN]
+    vl = v[blk, off % BLOCK_LEN]
+    return kl.reshape(bsz, -1).contiguous(), vl.reshape(bsz, -1).contiguous()
 
 
 def run_tm(q, k, v, bsz, klen, kv_quant, iters, warmup, stream):
@@ -119,8 +134,11 @@ def run_tm(q, k, v, bsz, klen, kv_quant, iters, warmup, stream):
     blocks_per_seq = (klen + BLOCK_LEN - 1) // BLOCK_LEN
     cu_block_nums = torch.arange(0, (bsz + 1) * blocks_per_seq, blocks_per_seq, dtype=torch.int32, device='cuda')
     out = torch.empty(bsz, NUM_HEADS * HEAD_DIM, dtype=q.dtype, device='cuda')
+    k_last, v_last = last_token_kv(k, v, bsz, klen)
     ms = _tm.attn_decode_bench(
         _tm.from_dlpack(q),
+        _tm.from_dlpack(k_last),
+        _tm.from_dlpack(v_last),
         _tm.from_dlpack(out),
         ptrs.data_ptr(),
         cu_block_nums.data_ptr(),

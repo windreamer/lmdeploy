@@ -1,11 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """[DEBUG-b304] Multi-batch compute-sanitizer entry for the B3-04 writer path.
 
-Exercises, on ONE pool with B=4: the TM write-kernel prefill append (bridge),
-two triton-free ATen decode-step appends with correctly packed feeds, then the
-TM decode and the Triton paged-attention reader. Minimal shapes so the
-sanitizer overhead stays tolerable. Memory-safety entry only — numeric gates
-live in tests/pytorch/kernel/test_tm_int8_kv.py.
+Exercises, on ONE pool with B=4: the TM write-kernel prefill append (bridge), two triton-free ATen decode-step appends
+with correctly packed feeds, then the TM decode and the Triton paged-attention reader. Minimal shapes so the sanitizer
+overhead stays tolerable. Memory-safety entry only — numeric gates live in tests/pytorch/kernel/test_tm_int8_kv.py.
 """
 
 import torch
@@ -69,10 +67,15 @@ for step in range(STEPS):
                      boff)
     torch.cuda.synchronize()
 
-# reader 1: TM decode (note: exercises the known kernel-side last-slot
-# zero-write; in-bounds, so sanitizer-clean but numerically destructive)
+# reader 1: TM decode. The decoding kernel re-stores k/v of ti = klen - 1
+# into the pool (kProcessKV), so the call passes the real rows of that
+# position and the store is idempotent (post-fix B3-04; passing garbage here
+# would quantize it into the pool's last valid slot).
 out = torch.empty(B, HQ * D, dtype=torch.bfloat16, device='cuda')
-_tm.tm_attn_decode(_tm.from_dlpack(q.reshape(B, -1).contiguous()), _tm.from_dlpack(out),
+kl = k[:, KLEN - 1].reshape(B, -1).contiguous()
+vl = v[:, KLEN - 1].reshape(B, -1).contiguous()
+_tm.tm_attn_decode(_tm.from_dlpack(q.reshape(B, -1).contiguous()), _tm.from_dlpack(kl),
+                   _tm.from_dlpack(vl), _tm.from_dlpack(out),
                    ptrs.data_ptr(), cu([BPS] * B).data_ptr(), num_heads=HQ, num_kv_heads=H,
                    head_dim=D, batch_size=B, block_len=S, max_k_len=KLEN,
                    kv_quant=8, stream_ptr=torch.cuda.current_stream().cuda_stream)
