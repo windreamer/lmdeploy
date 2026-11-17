@@ -10,8 +10,11 @@ K outside attention); decode steps dispatch the TM decode kernel
 - prefill / chunked prefill attention runs the stock Triton path on the
   layout's strided views, with (scale, min) slots converted to the PT
   (scale, zero) convention per step;
-- decode under CUDA graph capture (or multi-token queries) falls back to the
-  Triton paged attention for capture safety;
+- decode steps dispatch the TM decode kernel (`_tm.tm_attn_decode`) on eager
+  steps; during CUDA graph capture the metadata carries padded capture
+  buffers the binding cannot consume, so capture takes the capture-safe
+  Triton paged-attention fallback over the pool views (no stream queries or
+  D2H syncs) instead;
 - non-INT8 runtime quant policies behave exactly like `TritonAttentionImpl`
   (the pool then uses the default layout, matched by the same opt-in
   decision that built this impl).
@@ -59,7 +62,7 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
 
     def _pointer_tables(self, k_cache: torch.Tensor, attn_metadata: TritonAttentionMetadata):
         """Block pointer table plus per-sequence bases for the TM bindings."""
-        from ..tm_kv import tm_block_pointer_table
+        from ...tm_kv import tm_block_pointer_table
 
         pool_base, block_bytes, *_ = self._pool_geometry(k_cache)
         return tm_block_pointer_table(attn_metadata.block_offsets, pool_base, block_bytes)
@@ -82,7 +85,7 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
 
         if k_scales_zeros is None or v_scales_zeros is None:
             raise RuntimeError('TM int8 pool fill requires the quant scale views.')
-        from ..tm_kv import fill_kv_cache_tm
+        from ...tm_kv import fill_kv_cache_tm
 
         # Default: the triton-free ATen convert+scatter writer. The TM write
         # kernel (`_tm.tm_process_kv`) stays available under
@@ -147,10 +150,24 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         q = query.reshape(num_seqs, -1).contiguous()
         out = torch.empty((num_seqs, num_heads * head_dim), dtype=query.dtype, device=query.device)
         ptrs, cu_block_base = self._pointer_tables(k_cache, attn_metadata)
-        max_k_len = attn_metadata.max_kv_seqlen or int(attn_metadata.kv_seqlens.max())
-
+        # No D2H sync here: a `.max()` fallback on kv_seqlens would invalidate
+        # graph capture; fall back to the Triton path instead.
+        max_k_len = attn_metadata.max_kv_seqlen
+        if max_k_len is None:
+            return self._forward_triton_decode(query, k_cache, v_cache, attn_metadata)
+        # The binding re-stores the newest-token K/V rows into the pool, so it
+        # needs the [B, Hkv*D] rows of this step's new token per sequence;
+        # forward stashes them in _tm_last_new_kv before the pool fill.
+        key, value = getattr(self, '_tm_last_new_kv', (None, None))
+        if key is None or value is None:
+            raise RuntimeError('TM int8 decode: no new-token K/V captured for this step')
+        rows = attn_metadata.q_start_loc.to(torch.long)
+        k_rows = key.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
+        v_rows = value.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
         tm.tm_attn_decode(
             self._wrap(q),
+            self._wrap(k_rows),
+            self._wrap(v_rows),
             self._wrap(out),
             ptrs.data_ptr(),
             cu_block_base.data_ptr(),
@@ -165,8 +182,20 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         )
         return out.view(num_seqs, num_heads, head_dim)
 
+    def _forward_triton_decode(self, query, k_cache, v_cache, attn_metadata):
+        """Capture-safe Triton decode fallback over the TM pool views."""
+        return TritonAttentionImpl._forward_decoding(
+            self, query, k_cache, v_cache, attn_metadata, None,
+            k_scales_zeros=self._pt_scales(getattr(self, '_tm_k_scales_zeros', None)),
+            v_scales_zeros=self._pt_scales(getattr(self, '_tm_v_scales_zeros', None)))
+
     def _can_tm_decode(self, attn_metadata: TritonAttentionMetadata) -> bool:
-        """TM decode covers single-token decode steps outside graph capture."""
+        """TM decode covers single-token eager decode steps.
+
+        During graph capture the metadata carries padded capture buffers (max_kv_seqlen, seqlens), which the TM decode
+        binding cannot consume safely, so capture takes the capture-safe Triton fallback instead; replay keeps the pool
+        reads/writes on the same TM-managed storage.
+        """
         if attn_metadata.max_q_seqlen is not None and attn_metadata.max_q_seqlen != 1:
             return False
         return not torch.cuda.is_current_stream_capturing()
@@ -175,7 +204,7 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         """Rewrite (scale, min) slots to (scale, zero) for Triton readers."""
         if scales is None:
             return None
-        from ..tm_kv import tm_min_to_zero
+        from ...tm_kv import tm_min_to_zero
 
         return tm_min_to_zero(scales)
 
@@ -197,6 +226,13 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         stock Triton paths everywhere else."""
         if _is_tm_int8_policy(attn_metadata.quant_policy):
             if key is not None and value is not None:
+                # The TM decode binding needs this step's newest-token rows;
+                # stash them before the fill (works identically under graph
+                # capture: index_select on the captured input buffers is
+                # replayed).
+                self._tm_last_new_kv = (key, value)
+                self._tm_k_scales_zeros = k_scales_zeros
+                self._tm_v_scales_zeros = v_scales_zeros
                 self._fill_kv_cache_impl(key, value, k_cache, v_cache, attn_metadata,
                                          max_q_seqlen=self._get_max_q_seqlen(query, attn_metadata),
                                          k_scales_zeros=k_scales_zeros,

@@ -368,6 +368,43 @@ def test_aten_writer_pool_decodes():
     _assert_gate(out_pt, _reference(q, k, v, PREFILL_LEN), 'pt-reader/aten-writer')
 
 
+def test_aten_writer_fill_is_capture_safe():
+    """B3-04 defect-4 regression: the ATen pool fill must run inside CUDA
+    graph capture without a boolean-filtering host sync (previously
+    `cudaErrorStreamCaptureInvalidated` at engine start), and the captured
+    fill must place bytes exactly like an eager fill."""
+    from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm
+
+    _, k, v = _make_data()
+    k_slice = k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    v_slice = v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    q_loc = _cu([PREFILL_LEN] * BATCH)[:-1].long()
+    q_len = torch.full((BATCH, ), PREFILL_LEN, dtype=torch.long, device='cuda')
+
+    def fill(kc, vc, ksz, vsz):
+        fill_kv_cache_tm(k_slice, v_slice, kc, vc, ksz, vsz, q_loc, q_len, q_len, _block_offsets())
+
+    pool_ref = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    fill(*_layer_views(pool_ref, 0))
+
+    pool_cap = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    views = _layer_views(pool_cap, 0)
+    graph = torch.cuda.CUDAGraph()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        fill(*views)  # warmup outside capture
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    with torch.cuda.graph(graph):
+        fill(*views)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert torch.equal(pool_cap.pools[0].tensor, pool_ref.pools[0].tensor), \
+        'captured fill diverges from the eager fill'
+
+
 def test_aten_writer_multi_batch_packed_placement():
     """B3-04 regression: with correctly packed input the ATen writer places
     every token at its contract slot in multi-batch appends, and slots

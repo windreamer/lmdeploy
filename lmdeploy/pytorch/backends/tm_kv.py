@@ -337,11 +337,19 @@ def fill_kv_cache_tm(key: torch.Tensor,
     block_ids = block_offsets[batch_ids, safe_positions.div(block_len, rounding_mode='floor')]
     token_in_block = safe_positions % block_len
 
+    # Capture-safe masked scatter: advanced indexing with plain (dense)
+    # index tensors, then `where` on the gathered old values. Invalid rows
+    # rewrite their (clamped) slot with its own current content, so the
+    # pool is untouched for them and no boolean filtering (host sync,
+    # `cudaErrorStreamCaptureInvalidated` under graph capture) happens.
+    keep = valid.view(-1, 1, 1)
     for x, cache, params in ((key, k_cache, k_sz), (value, v_cache, v_sz)):
         codes, scale, lo = quant_kv_int8(x)
-        cache[block_ids[valid], token_in_block[valid]] = codes[valid]
-        param_pair = torch.stack((scale, lo), dim=-1)
-        params[block_ids[valid], token_in_block[valid]] = param_pair[valid].to(params.dtype)
+        old_codes = cache[block_ids, token_in_block]
+        cache[block_ids, token_in_block] = torch.where(keep, codes, old_codes)
+        old_params = params[block_ids, token_in_block]
+        param_pair = torch.stack((scale, lo), dim=-1).to(params.dtype)
+        params[block_ids, token_in_block] = torch.where(keep, param_pair, old_params)
 
 
 def tm_min_to_zero(sz: torch.Tensor) -> torch.Tensor:
