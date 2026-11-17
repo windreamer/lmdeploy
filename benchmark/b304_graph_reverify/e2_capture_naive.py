@@ -11,15 +11,14 @@ Each case: eager control dispatch first (identical args, outside capture),
 then warmup + capture + replay; replay vs eager control bitwise, plus a
 mutation probe (buffer contents changed device-side between replays).
 """
-import sys
 import os
+import sys
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import torch  # noqa: E402
-
 import common as C_  # noqa: E402
+import torch  # noqa: E402
 
 assert torch.cuda.is_available()
 

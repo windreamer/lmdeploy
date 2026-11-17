@@ -1,13 +1,12 @@
 """E1: EAGER baseline (known green). TM int8 decode single call vs bf16
 reference and vs pool-dequant reference. Budget: max_abs <= 0.25."""
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import torch  # noqa: E402
-
 import common as C_  # noqa: E402
+import torch  # noqa: E402
 
 assert torch.cuda.is_available()
 torch.manual_seed(0)

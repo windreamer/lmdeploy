@@ -1,25 +1,20 @@
 """Standalone repro of the layout-sensitive captured-ATen-writer mis-scatter.
 
-Verbatim copy of the module's build_capture (else-branch = captured
-fill_kv_cache_tm) driven by the phase_contract loop: r0 matches the eager
-reference bitwise; r1/r2 mis-scatter (~4KB sprayed into wrong slots of
-blocks 7/11, cap_nz 12574 vs ref_nz 8382). Deterministic per process shape;
-trivially equivalent shapes pass (hoisted views / different pool allocation
-order / loop at module scope). The repo's own
-test_aten_writer_fill_is_capture_safe passes in isolation.
+Verbatim copy of the module's build_capture (else-branch = captured fill_kv_cache_tm) driven by the phase_contract loop:
+r0 matches the eager reference bitwise; r1/r2 mis-scatter (~4KB sprayed into wrong slots of blocks 7/11, cap_nz 12574 vs
+ref_nz 8382). Deterministic per process shape; trivially equivalent shapes pass (hoisted views / different pool
+allocation order / loop at module scope). The repo's own test_aten_writer_fill_is_capture_safe passes in isolation.
 
-Indicates the captured fill's correctness depends on allocation lifetime /
-layout, not just the persistent-buffer contract. Flagged for upstream
-follow-up; not part of the TM-binding verdict.
+Indicates the captured fill's correctness depends on allocation lifetime / layout, not just the persistent-buffer
+contract. Flagged for upstream follow-up; not part of the TM-binding verdict.
 """
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import torch  # noqa: E402
-
 import common as C_  # noqa: E402
+import torch  # noqa: E402
 
 from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm  # noqa: E402
 

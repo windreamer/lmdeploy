@@ -15,14 +15,13 @@ Probes, in order:
 
 Capture geometry: ptrs table baked to pool1 (k_cache of pool1).
 """
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import torch  # noqa: E402
-
 import common as C_  # noqa: E402
+import torch  # noqa: E402
 
 assert torch.cuda.is_available()
 

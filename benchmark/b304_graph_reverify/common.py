@@ -151,7 +151,10 @@ def bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0):
 
 def writer_append(k_new, v_new, kv_seqlens, pool, layer=0):
     """ATen masked-scatter append of 1 token/sequence (capture-safe writer,
-    used eagerly between replays). k_new/v_new: (B, Hkv, D) or (1, B, Hkv, D)."""
+    used eagerly between replays).
+
+    k_new/v_new: (B, Hkv, D) or (1, B, Hkv, D).
+    """
     from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm
 
     if k_new.dim() == 4:
@@ -185,8 +188,10 @@ def pointer_tables(k_cache):
 
 
 def tm_decode(q2d, k2d, v2d, out2d, ptrs, cu_base, max_k_len):
-    """One TM int8 decode dispatch on caller-owned buffers. No sync (must be
-    legal inside CUDA graph capture). Buffers must be 2-D contiguous bf16."""
+    """One TM int8 decode dispatch on caller-owned buffers.
+
+    No sync (must be legal inside CUDA graph capture). Buffers must be 2-D contiguous bf16.
+    """
     from lmdeploy.turbomind import _tm
 
     _tm.tm_attn_decode(

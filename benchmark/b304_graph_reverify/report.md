@@ -4,7 +4,7 @@
 **目录**: `benchmark/b304_graph_reverify/`(全部脚本 + `*_results.json` + sanitizer 日志;`lmdeploy/pytorch/` 未改动,未 commit)
 **日期**: 2026-11-17
 
----
+______________________________________________________________________
 
 ## 判定:CONFIRMED(结论成立,机制修正)
 
@@ -14,17 +14,18 @@
 
 **关键反直觉事实:capture 不会失败**。`torch.cuda.CUDAGraph` 捕获 TM decode binding 在本栈上**成功**(无 `StreamCaptureInvalidated`),产出的是**静默错误**的图——这比捕获失败更危险,也意味着另一 agent 的"图捕获失败"经历若指 capture 报错,则与本机行为不同(可能为旧驱动/torch 或不同路径);若指回落实测,则与本验证一致。
 
----
+______________________________________________________________________
 
 ## 1. E1 EAGER 基线 — 绿(复现已知状态)
 
 ```
 命令: python e1_eager_baseline.py
 ```
-| 对照 | max_abs | KL | 判定 |
-|---|---|---|---|
-| vs bf16 参考(192 keys/seq) | 0.2324 | 1.02e-3 | ✅ ≤0.25 |
-| vs pool-dequant 参考 | 0.000502 | 8.46e-9 | ✅(近位级) |
+
+| 对照                       | max_abs  | KL      | 判定       |
+| -------------------------- | -------- | ------- | ---------- |
+| vs bf16 参考(192 keys/seq) | 0.2324   | 1.02e-3 | ✅ ≤0.25   |
+| vs pool-dequant 参考       | 0.000502 | 8.46e-9 | ✅(近位级) |
 
 prefill(`tm_process_kv`)→ pool → `_tm.tm_attn_decode`(新签名,k/v rows)链路正确。
 
@@ -35,11 +36,13 @@ prefill(`tm_process_kv`)→ pool → `_tm.tm_attn_decode`(新签名,k/v rows)链
 ```
 
 **e2b-exact(精确 metadata, max_k_len=192, 所有序列真长 192)**:
+
 - capture: **OK**(两次 warmup + `torch.cuda.graph` 捕获均无异常)
 - replay vs 同参数 eager control(输入位级相同): **max_abs=0.152,非位级** — 图回放与直接执行同一调用结果不同
 - mutation probe(仅改 q/k/v rows 内容后 replay): replay vs 新内容 eager: max_abs=0.149;vs 新内容 bf16 参考 0.168(≤0.25,**假绿**——预算门无法识别陈旧,见 §4)
 
 **e2a-padded(padded max_k_len=256,真长 192,镜像生产 padded max_kv_seqlen)**:
+
 - eager padded dispatch vs 真长参考: max_abs=0.185、KL 8.8e-4 — **eager 下即超 0.25 预算(语义危害非 capture 特有)**
 - **pool 尾部写破坏**: padded dispatch 把最新 token rows re-store 到 `ti = max_k_len-1 = 255`(超出真长),pool 尾块出现 8384 个非零字节(`eager_tail_nonzero_bytes: 8384`)——padded metadata 经此 binding 会**写坏 pool**,同样与 capture 无关
 - capture: OK;replay vs eager: 0.116(同样不健全)
@@ -59,15 +62,18 @@ P2 干扰@256:           两次 replay 之间仅插入一次 eager binding 调�
                        下一次 replay 输出改变: B_vs_A_max_abs = 0.1157
 P3 干扰@192:           再插一次 eager@192 → replay 再变: C_vs_A=0.152, C_vs_B=0.037
 ```
+
 纯 host 栈扰动(设备状态位级不变)即改变 replay 输出 → **replay 在消费易变宿主栈**。
 
 ### 3.2 plan 缓冲在捕获区内被 cudaFreeAsync 释放 → replay 指向悬空/回收分配
 
 图节点直方图(`python e3d2_graph_introspect.py`):
+
 ```
 tm-binding 图: 36 节点 {kernel:12, free:8, memcpy:6, memset:2, memcpy_from_symbol:8, alloc:0}
 torch 控制图:  15 节点 {kernel:14, memcpy:1},replay 正确(sink_all_two=True)
 ```
+
 `TmAttnDecode` 返回时 8 个 plan 张量(qkv/finished/cu_q/cu_k/readonly/split_cnt/partial_O/partial_ML)经 `cudaFreeAsync` 记录为 **8 个 free 节点,而分配节点为 0** → 每次 replay 结束即释放、且无重分配节点;replay 间任何 eager TM 调用会回收复用这些地址。这解释了 E3 的"replay 惰性"(§3 之下):捕获后的 replay 从不写 out 缓冲、从不跟随新内容。
 
 ### 3.3 binding 无 device 端长度接口 → 前缀增长不可表达
@@ -79,7 +85,9 @@ torch 控制图:  15 节点 {kernel:14, memcpy:1},replay 正确(sink_all_two=Tru
 ```
 命令: python e3_capture_stable.py --phase all --rounds 6
 ```
+
 常驻缓冲契约完全满足(q/k/v rows、out、block table、pool 全部捕获前分配,指针表在捕获区内 device 重建):
+
 - **每轮 replay 输出位级不变**(`round_over_round_max_abs=0.0`,`content_followed=False`,mutation 4 轮 + growth 6 轮全部如此)— 新 q/k/v 内容完全不进入输出
 - D3 探针(`python e3_debug.py`):`out_buf.zero_()` 后 replay,out 保持全零(`nonzero=0`)— **捕获内核节点不写输出缓冲**
 - D1/D2 探针:仅改 q / 仅改 k/v rows 后 replay,输出位级不变(O2==O1、O3==O2)
@@ -117,12 +125,12 @@ torch 控制图:  15 节点 {kernel:14, memcpy:1},replay 正确(sink_all_two=Tru
 
 ## 6. 证据文件
 
-| 文件 | 内容 |
-|---|---|
-| `e1_eager_baseline.py` / `e1_results.json` | EAGER 基线 |
-| `e2_capture_naive.py` / `e2_results.json` | 争议路径复现(exact/padded × capture/replay/mutation) |
-| `e2b_stack_probe.py` / `e2b_results.json` | P0-P4 栈干扰因果探针 |
-| `e3_capture_stable.py` / `e3_results.json` | 常驻缓冲契约(mutation/growth/contract 三相) |
-| `e3_debug.py`, `e3d2_graph_introspect.py` / `e3d*.json` | 惰性/写失效探针 + 图节点直方图 |
-| `e3_contract_anomaly.py` | ATen writer 布局敏感回放异常独立复现 |
-| `memcheck_e3.log`, `racecheck_e3.log`, `initcheck_e1.log` | sanitizer 原始日志 |
+| 文件                                                      | 内容                                                 |
+| --------------------------------------------------------- | ---------------------------------------------------- |
+| `e1_eager_baseline.py` / `e1_results.json`                | EAGER 基线                                           |
+| `e2_capture_naive.py` / `e2_results.json`                 | 争议路径复现(exact/padded × capture/replay/mutation) |
+| `e2b_stack_probe.py` / `e2b_results.json`                 | P0-P4 栈干扰因果探针                                 |
+| `e3_capture_stable.py` / `e3_results.json`                | 常驻缓冲契约(mutation/growth/contract 三相)          |
+| `e3_debug.py`, `e3d2_graph_introspect.py` / `e3d*.json`   | 惰性/写失效探针 + 图节点直方图                       |
+| `e3_contract_anomaly.py`                                  | ATen writer 布局敏感回放异常独立复现                 |
+| `memcheck_e3.log`, `racecheck_e3.log`, `initcheck_e1.log` | sanitizer 原始日志                                   |

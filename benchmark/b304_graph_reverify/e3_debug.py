@@ -12,15 +12,14 @@ window):
   D5 pure-host deep activity (no device change): eager control again ->
      replay -> O5 vs O4 (stack sensitivity without device change)
 """
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import torch  # noqa: E402
-
 import common as C_  # noqa: E402
 import e3_capture_stable as E3  # noqa: E402
+import torch  # noqa: E402
 
 assert torch.cuda.is_available()
 

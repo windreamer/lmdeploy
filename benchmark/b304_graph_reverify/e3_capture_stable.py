@@ -32,14 +32,13 @@ Phases:
             own capture-safety test).
 """
 import argparse
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import torch  # noqa: E402
-
 import common as C_  # noqa: E402
+import torch  # noqa: E402
 
 assert torch.cuda.is_available()
 
@@ -47,7 +46,10 @@ POOL_TENSOR = None  # set per phase
 
 
 def build_capture(pool, k_cache, max_k_len, use_binding=True):
-    """Persistent buffers + captured step. Returns (graph, bufs)."""
+    """Persistent buffers + captured step.
+
+    Returns (graph, bufs).
+    """
     bo = C_.block_offsets()  # (B, C) int32, persistent
     q_buf = torch.zeros(C_.BATCH, C_.NUM_HEADS * C_.HEAD_DIM, dtype=torch.bfloat16, device='cuda')
     k_buf = torch.zeros(C_.BATCH, C_.NUM_KV_HEADS * C_.HEAD_DIM, dtype=torch.bfloat16, device='cuda')
