@@ -311,7 +311,6 @@ def test_exclusive_backend_dispatch_matches_disjoint_full_outputs(monkeypatch, f
 
 
 def test_backend_layout_is_bound_at_construction_not_inferred_from_metadata():
-    from lmdeploy.pytorch import envs as _envs
     from lmdeploy.pytorch.backends.causal_conv1d import CausalConv1dBuildSpec
     from lmdeploy.pytorch.backends.cuda.causal_conv1d import CausalConv1dTilelangImpl
     from lmdeploy.pytorch.backends.cuda.gated_delta_rule import CudaGatedDeltaRuleImpl
@@ -325,15 +324,10 @@ def test_backend_layout_is_bound_at_construction_not_inferred_from_metadata():
     assert conv.indexed_state and rule.indexed_state and meta.indexed_state
     assert all('forward' not in vars(impl) for impl in (conv, rule, meta))
     assert '_build' not in vars(meta)
-    # The env route decides the class at construction time; the TurboMind
-    # decode graft subclasses the CUDA impl and keeps the same contract.
-    if _envs.gdn_backend != 'off' and rule.__class__.__name__ == 'TmGatedDeltaRuleImpl':
-        from lmdeploy.pytorch.backends.cuda.tm_gated_delta_rule import TmGatedDeltaRuleImpl
-        assert rule.forward.__func__ is TmGatedDeltaRuleImpl.forward
-    else:
-        assert rule.forward.__func__ is CudaGatedDeltaRuleImpl.forward
+    assert rule.forward.__func__ is CudaGatedDeltaRuleImpl.forward
     assert rule.get_step_metadata_provider().indexed_state
     assert meta._build.__name__ == '_build'
     other = CudaOpsBackend.build_op(GatedDeltaRuleBuildSpec())
+    assert other.forward.__func__ is rule.forward.__func__
     assert not other.indexed_state
     assert not other.get_step_metadata_provider().indexed_state

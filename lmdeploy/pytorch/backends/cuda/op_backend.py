@@ -61,7 +61,6 @@ class CudaOpsBackend(DefaultOpsBackend):
         from ..rejection_sampling import RejectionSamplingBuildSpec
         from ..static_fp8_modules import LinearStaticF8BuildSpec
         from ..tm_gemm_modules import LinearTmGemmBuildSpec
-        from ..tm_moe_modules import FusedMoETmW4A16BuildSpec
         if isinstance(spec, SiluAndMulBuildSpec):
             from .activation import TritonSiluAndMulImpl
             return cast(ImplT, TritonSiluAndMulImpl(spec.inplace))
@@ -151,25 +150,11 @@ class CudaOpsBackend(DefaultOpsBackend):
             from .gated_delta_rule import CudaGatedDeltaMetaImpl
             return cast(ImplT, CudaGatedDeltaMetaImpl(indexed_state=spec.indexed_state))
         if isinstance(spec, GatedDeltaRuleBuildSpec):
-            from lmdeploy.pytorch import envs as _envs
-
             from .gated_delta_rule import CudaGatedDeltaRuleImpl
-            if spec.indexed_state and _envs.gdn_backend != 'off':
-                from .tm_gated_delta_rule import TmGatedDeltaRuleImpl, build_level_decline_reason
-                reason = build_level_decline_reason()
-                if reason is None:
-                    return cast(ImplT, TmGatedDeltaRuleImpl(indexed_state=spec.indexed_state))
-                if _envs.gdn_backend == 'on':
-                    raise RuntimeError(
-                        f'TurboMind GDN decode was requested (LMDEPLOY_GDN_BACKEND=on) but is unavailable: {reason}.')
-                logger.info(f'GDN decode routing: turbomind declined ({reason}); falling back to fla.')
             return cast(ImplT, CudaGatedDeltaRuleImpl(indexed_state=spec.indexed_state))
         if isinstance(spec, LinearTmGemmBuildSpec):
             from .tm_gemm_modules import _build_linear_tm_gemm
             return cast(ImplT, _build_linear_tm_gemm(spec))
-        if isinstance(spec, FusedMoETmW4A16BuildSpec):
-            from .tm_moe_modules import _build_fused_moe_tm
-            return cast(ImplT, _build_fused_moe_tm(spec))
         if isinstance(spec, LinearW4A16BuildSpec):
             from .awq_modules import _build_linear_w4a16
             return cast(ImplT, _build_linear_w4a16(spec))

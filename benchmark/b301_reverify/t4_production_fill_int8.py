@@ -41,6 +41,7 @@ import sys
 
 import torch
 import triton
+
 from lmdeploy.messages import QuantPolicy
 from lmdeploy.pytorch.kernels.cuda.fill_kv_cache import fill_kv_cache
 
@@ -57,7 +58,7 @@ def check(name, ok, detail):
 
 
 def golden_quant_fp32(seg):
-    """seg (bsz, bps, S, H, D) bf16 -> codes uint8, scales/zeros fp32."""
+    """Seg (bsz, bps, S, H, D) bf16 -> codes uint8, scales/zeros fp32."""
     x = seg.to(torch.float32)
     lo = x.amin(dim=-1, keepdim=True)
     hi = x.amax(dim=-1, keepdim=True)
@@ -68,7 +69,8 @@ def golden_quant_fp32(seg):
 
 
 def ulp_diff(a, b):
-    """Elementwise fp32 ulp distance (as int32 bit difference of ordered pairs)."""
+    """Elementwise fp32 ulp distance (as int32 bit difference of ordered
+    pairs)."""
     ai = a.contiguous().view(torch.int32)
     bi = b.contiguous().view(torch.int32)
     return (ai - bi).abs()

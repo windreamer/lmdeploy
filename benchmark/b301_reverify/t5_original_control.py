@@ -24,5 +24,6 @@ out = bridge.check_production_fill_anomaly()
 torch.cuda.synchronize()
 print('T5 control (original agent harness, verbatim):', out)
 ok = out['blocks_with_valid_params'] == out['blocks_total']
-print(f"T5 VERDICT: {'production fill intact -> claim NOT reproduced' if ok else 'claim REPRODUCED on original harness'}")
+print('T5 VERDICT:', 'production fill intact -> claim NOT reproduced'
+      if ok else 'claim REPRODUCED on original harness')
 sys.exit(0 if ok else 1)
