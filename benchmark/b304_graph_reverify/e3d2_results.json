@@ -1,0 +1,41 @@
+{
+  "e3d2": [
+    {
+      "graph": "torch-control",
+      "nodes": 15,
+      "types": {
+        "kernel": 14,
+        "memcpy": 1
+      }
+    },
+    {
+      "graph": "tm-binding",
+      "nodes": 36,
+      "types": {
+        "kernel": 12,
+        "free": 8,
+        "memcpy": 6,
+        "memset": 2,
+        "memcpy_from_symbol": 8
+      }
+    },
+    {
+      "probe": "out_after_capture_iszero",
+      "zero": false
+    },
+    {
+      "probe": "out_pre_minus_after",
+      "changed": false,
+      "zero": false
+    },
+    {
+      "probe": "replay_changed_out",
+      "changed": false,
+      "post_zero": false
+    },
+    {
+      "probe": "torch_graph_replay_works",
+      "sink_all_two": true
+    }
+  ]
+}

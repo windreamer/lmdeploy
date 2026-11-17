@@ -1,0 +1,69 @@
+{
+  "e3d": [
+    {
+      "label": "D0/replay-vs-dequant-ref",
+      "max_abs": 0.030009,
+      "kl": "1.494e-05",
+      "argmatch": 0.890625,
+      "ok": true
+    },
+    {
+      "probe": "D0/O1-vs-eager",
+      "max_abs": 0.02996826,
+      "bitwise": false
+    },
+    {
+      "probe": "D1/O2-vs-O1",
+      "max_abs": 0.0,
+      "bitwise": true
+    },
+    {
+      "label": "D1/replay-vs-dequant-ref(new q)",
+      "max_abs": 0.02962,
+      "kl": "1.744e-05",
+      "argmatch": 0.375,
+      "ok": true
+    },
+    {
+      "probe": "D1/O2-vs-eager",
+      "max_abs": 0.02978516,
+      "bitwise": false
+    },
+    {
+      "probe": "D2/O3-vs-O2",
+      "max_abs": 0.0,
+      "bitwise": true
+    },
+    {
+      "label": "D2/replay-vs-dequant-ref(after re-store)",
+      "max_abs": 0.02962,
+      "kl": "1.744e-05",
+      "argmatch": 0.375,
+      "ok": true
+    },
+    {
+      "probe": "D2/O3-vs-eager",
+      "max_abs": 0.02929688,
+      "bitwise": false
+    },
+    {
+      "probe": "D3/out-nonzero-after-replay",
+      "nonzero": 0
+    },
+    {
+      "probe": "D3/O4-vs-O3",
+      "max_abs": 0.10449219,
+      "bitwise": false
+    },
+    {
+      "probe": "D5/O5-vs-O4",
+      "max_abs": 0.0,
+      "bitwise": true
+    },
+    {
+      "probe": "D6/graph192-replay",
+      "dist_to_full_window_prob": 0.000516,
+      "dist_to_192_window_prob": 0.000275
+    }
+  ]
+}

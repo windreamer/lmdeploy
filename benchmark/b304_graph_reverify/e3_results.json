@@ -1,0 +1,112 @@
+{
+  "e3": [
+    {
+      "label": "mutation/r0/vs-pool-dequant-ref",
+      "max_abs": 0.029973,
+      "kl": "1.739e-05",
+      "argmatch": 0.390625,
+      "ok": true
+    },
+    {
+      "tag": "mutation/r0",
+      "replay2_vs_replay1_bitwise": true,
+      "replay_wander_max_abs": 0.0,
+      "replay2_vs_eager_bitwise": false,
+      "replay2_vs_eager_max_abs": 0.02996826
+    },
+    {
+      "label": "mutation/r1/vs-pool-dequant-ref",
+      "max_abs": 0.038078,
+      "kl": "2.761e-05",
+      "argmatch": 0.375,
+      "ok": true
+    },
+    {
+      "tag": "mutation/r1",
+      "replay2_vs_replay1_bitwise": true,
+      "replay_wander_max_abs": 0.0,
+      "replay2_vs_eager_bitwise": false,
+      "replay2_vs_eager_max_abs": 0.03808594
+    },
+    {
+      "tag": "mutation/r1",
+      "round_over_round_max_abs": 0.0,
+      "content_followed": false
+    },
+    {
+      "phase": "mutation",
+      "verdict": "DONE"
+    },
+    {
+      "label": "growth/L193/vs-pool-dequant-ref",
+      "max_abs": 0.033376,
+      "kl": "1.955e-05",
+      "argmatch": 0.40625,
+      "ok": true
+    },
+    {
+      "tag": "growth/L193",
+      "replay2_vs_replay1_bitwise": true,
+      "replay_wander_max_abs": 0.0,
+      "replay2_vs_eager_bitwise": false,
+      "replay2_vs_eager_max_abs": 0.03338623
+    },
+    {
+      "tag": "growth/L193",
+      "note": "vs TRUE-length bf16 ref (frozen-k_len semantic gap, report-only)",
+      "max_abs": 0.181674,
+      "kl": "8.760e-04"
+    },
+    {
+      "label": "growth/L200/vs-pool-dequant-ref",
+      "max_abs": 0.032899,
+      "kl": "2.261e-05",
+      "argmatch": 0.328125,
+      "ok": true
+    },
+    {
+      "tag": "growth/L200",
+      "replay2_vs_replay1_bitwise": true,
+      "replay_wander_max_abs": 0.0,
+      "replay2_vs_eager_bitwise": false,
+      "replay2_vs_eager_max_abs": 0.03295898
+    },
+    {
+      "tag": "growth/L200",
+      "round_over_round_max_abs": 0.0,
+      "content_followed": false
+    },
+    {
+      "tag": "growth/L200",
+      "note": "vs TRUE-length bf16 ref (frozen-k_len semantic gap, report-only)",
+      "max_abs": 0.168128,
+      "kl": "8.637e-04"
+    },
+    {
+      "phase": "growth",
+      "verdict": "DONE"
+    },
+    {
+      "tag": "contract/r0",
+      "captured_fill_bitwise_equals_eager": true,
+      "cap_nz": 8383,
+      "ref_nz": 8383
+    },
+    {
+      "tag": "contract/r1",
+      "captured_fill_bitwise_equals_eager": false,
+      "cap_nz": 12574,
+      "ref_nz": 8382
+    },
+    {
+      "tag": "contract/r2",
+      "captured_fill_bitwise_equals_eager": false,
+      "cap_nz": 18862,
+      "ref_nz": 8384
+    },
+    {
+      "phase": "contract",
+      "verdict": "OK"
+    }
+  ]
+}

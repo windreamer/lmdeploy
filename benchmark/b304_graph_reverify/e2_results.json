@@ -1,0 +1,60 @@
+{
+  "e2": [
+    {
+      "label": "e2b-exact",
+      "note": "eager control ok",
+      "max_k_len": 192,
+      "eager_tail_nonzero_bytes": 0
+    },
+    {
+      "label": "e2b-exact",
+      "capture": "OK",
+      "replay_vs_eager_max_abs": 0.15234375,
+      "replay_vs_eager_bitwise": false
+    },
+    {
+      "label": "e2b-exact",
+      "probe": "mutation",
+      "replay_vs_eager_max_abs": 0.14941406,
+      "replay_vs_eager_bitwise": false
+    },
+    {
+      "label": "e2b-exact/mutation-vs-bf16-ref",
+      "max_abs": 0.167826,
+      "kl": "6.852e-04",
+      "argmatch": 0.0,
+      "ok": true
+    },
+    {
+      "label": "e2a-padded",
+      "note": "eager control ok",
+      "max_k_len": 256,
+      "eager_tail_nonzero_bytes": 8384
+    },
+    {
+      "label": "e2a-padded",
+      "note": "eager padded vs TRUE-length bf16 ref (semantic gap; report-only, not a capture claim)",
+      "max_abs": 0.184915,
+      "kl": "8.792e-04"
+    },
+    {
+      "label": "e2a-padded",
+      "capture": "OK",
+      "replay_vs_eager_max_abs": 0.11572266,
+      "replay_vs_eager_bitwise": false
+    },
+    {
+      "label": "e2a-padded",
+      "probe": "mutation",
+      "replay_vs_eager_max_abs": 0.11328125,
+      "replay_vs_eager_bitwise": false
+    },
+    {
+      "label": "e2a-padded/mutation-vs-bf16-ref",
+      "max_abs": 0.167826,
+      "kl": "6.852e-04",
+      "argmatch": 0.0,
+      "ok": true
+    }
+  ]
+}

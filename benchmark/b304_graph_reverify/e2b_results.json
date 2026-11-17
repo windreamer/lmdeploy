@@ -1,0 +1,38 @@
+{
+  "e2b": [
+    {
+      "probe": "P0/eager-determinism",
+      "bitwise": true,
+      "max_abs": 0.0
+    },
+    {
+      "probe": "P1/replay-determinism",
+      "bitwise": true,
+      "max_abs": 0.0
+    },
+    {
+      "probe": "P1/replay-vs-eager",
+      "max_abs": 0.0,
+      "bitwise": true
+    },
+    {
+      "probe": "P2/stack-interference@256",
+      "pool1_tail_unchanged": true,
+      "replay_changed_vs_A": true,
+      "B_vs_A_max_abs": 0.115723,
+      "B_vs_eager192_max_abs": 0.0
+    },
+    {
+      "probe": "P3/stack-interference@192",
+      "C_vs_A_bitwise": false,
+      "C_vs_A_max_abs": 0.152344,
+      "C_vs_B_bitwise": false,
+      "C_vs_B_max_abs": 0.036621
+    },
+    {
+      "probe": "P4/content-follow",
+      "replay_vs_eager_bitwise": false,
+      "replay_vs_eager_max_abs": 0.053711
+    }
+  ]
+}

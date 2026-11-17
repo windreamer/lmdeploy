@@ -8,6 +8,13 @@ workflow: 本仓库开发分支续用,每阶段一 commit;stack PR 于批 3 落�
 
 # SPEC:批 3 嫁接(MoE grouped / GDN decode / packed-KV int8)
 
+## Status(2026-11-17,B3-06 验收)
+
+- **MoE grouped(B3-02)**:已实现并闭环——金样本门 `tests/pytorch/engine/test_w4a16_moe_golden_gate.py`;harness rung `benchmark/w4a16_acceptance.py --suite moe`;实测绿(数值门 PASS,TM/Triton = 0.93/1.09/0.97 @ b=1/8/32 tiny 对)。
+- **int8-KV(B3-04)**:已实现并闭环——bridge 探针 B3-01、内核契约 `tests/pytorch/kernel/test_tm_int8_kv.py`;harness rung `--suite int8kv`;修复后真路径实测绿(数值门 PASS,最坏 KL 3.50e-06 ≤ 2e-3;TM/stock = 0.08/0.64/1.23 @ b=1/8/32 eager decode)。**图捕获适配为遗留项**(GraphReverify CONFIRMED:binding 三重缺陷——栈 H2D 固化/cudaFreeAsync 释放/无 device 侧长度;修复需 binding C++ 重构,详见 `benchmark/b304_graph_reverify/`);当前设计 = 图捕获走 Triton fallback(eager 走 TM),已验证 capture-safe。
+- **TP=2**:管道就绪,实测数移交 H200(`--suite tp2` + `--preset h200`)。
+- **GDN**:按 2026-11-17 回滚决议移出批 3;两段式 ROADMAP 条目继续有效。
+
 ## Problem Statement
 
 批 1 把 TM 的 dense W4A16 GEMM 嫁接进了 PyTorch 引擎并验证达标(decode 非劣成立、小中 batch 反超 1.4–2.5×、小 batch ≈ 原生 TM)。但用户主力模型(GLM-5.3-flash:42 个 sparse 层 + 34 层 GDN + 11 层 MLA)的核心算子——MoE grouped GEMM、GDN 递归状态更新、低比特 KV 读取——仍在 PyTorch 侧以较慢的实现运行;批 2 测速证明这三处 TM kernel 分别快 1.58–7.67×、1.41–3.50×(decode)、1.34–1.86×(生产档)。

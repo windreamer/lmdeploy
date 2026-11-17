@@ -1,0 +1,18 @@
+{
+  "e1": [
+    {
+      "label": "eager-vs-bf16-ref",
+      "max_abs": 0.232411,
+      "kl": "1.019e-03",
+      "argmatch": 0.0,
+      "ok": true
+    },
+    {
+      "label": "eager-vs-pool-dequant-ref",
+      "max_abs": 0.000502,
+      "kl": "8.456e-09",
+      "argmatch": 1.0,
+      "ok": true
+    }
+  ]
+}
