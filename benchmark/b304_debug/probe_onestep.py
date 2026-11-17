@@ -1,3 +1,5 @@
+# ruff: noqa: I001, E402, E702
+# ruff: noqa: I001, E402
 # [DEBUG-b304] Slot-accurate landing map for one mixed-chain step.
 # One fill call (T=4, q=[1,1,1,1], kv=[193]*4, block table b*4+[0..3], fp32
 # params): snapshot-diff the pool and report EVERY changed byte mapped to

@@ -1,3 +1,5 @@
+# ruff: noqa: I001, E402, E702
+# ruff: noqa: I001, E402
 # [DEBUG-b304] Provenance search: what token actually sits in slot (block 3,
 # slot 0) after the 64-step loop? Compare stored codes/params against quant
 # of every candidate token.

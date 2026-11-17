@@ -1,0 +1,59 @@
+[
+ {
+  "mode": "recurrent",
+  "bsz": 1,
+  "tokens": 1,
+  "layout": "kv",
+  "tm_ms": 0.01331,
+  "pt_ms": 0.04813,
+  "speedup_pt_over_tm": 3.615
+ },
+ {
+  "mode": "recurrent",
+  "bsz": 1,
+  "tokens": 1,
+  "layout": "vk",
+  "tm_ms": 0.01739,
+  "pt_ms": 0.04813,
+  "speedup_pt_over_tm": 2.767,
+  "transpose_penalty_vs_kv": 1.306
+ },
+ {
+  "mode": "recurrent",
+  "bsz": 8,
+  "tokens": 1,
+  "layout": "kv",
+  "tm_ms": 0.09318,
+  "pt_ms": 0.17613,
+  "speedup_pt_over_tm": 1.89
+ },
+ {
+  "mode": "recurrent",
+  "bsz": 8,
+  "tokens": 1,
+  "layout": "vk",
+  "tm_ms": 0.0983,
+  "pt_ms": 0.17613,
+  "speedup_pt_over_tm": 1.792,
+  "transpose_penalty_vs_kv": 1.055
+ },
+ {
+  "mode": "recurrent",
+  "bsz": 32,
+  "tokens": 1,
+  "layout": "kv",
+  "tm_ms": 0.37886,
+  "pt_ms": 0.53094,
+  "speedup_pt_over_tm": 1.401
+ },
+ {
+  "mode": "recurrent",
+  "bsz": 32,
+  "tokens": 1,
+  "layout": "vk",
+  "tm_ms": 0.33997,
+  "pt_ms": 0.53094,
+  "speedup_pt_over_tm": 1.562,
+  "transpose_penalty_vs_kv": 0.897
+ }
+]

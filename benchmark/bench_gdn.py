@@ -53,14 +53,17 @@ def tm_state_ptrs(state: torch.Tensor, bsz: int):
     return ptrs.view(1, bsz, 1)
 
 
-def run_tm_step(q, k, v, g, beta, state, mode, iters, warmup, stream, chunk_size=None):
-    """One TM call per timed iteration (one decode step or one chunked
-    call)."""
+def run_tm_step(q, k, v, g, beta, state, mode, iters, warmup, stream, chunk_size=None, state_layout='kv'):
+    """One TM call per timed iteration (one decode step or one chunked call).
+
+    `state_layout` selects the recurrent state addressing variant:
+    'kv' = TM native [K,V], 'vk' = PT pool [V,K] (zero-copy direct read).
+    """
     bsz, tokens = q.shape[:2]
     if mode == 'recurrent':
         plan = _tm.delta_rule_plan(_tm.from_dlpack(q), _tm.from_dlpack(k), _tm.from_dlpack(v),
                                    _tm.from_dlpack(g), _tm.from_dlpack(beta),
-                                   state_dtype='f32', mode='recurrent')
+                                   state_dtype='f32', mode='recurrent', state_layout=state_layout)
     else:
         q_offsets = torch.arange(0, (bsz + 1) * tokens, tokens, dtype=torch.int32, device='cuda')
         plan = _tm.delta_rule_plan(_tm.from_dlpack(q), _tm.from_dlpack(k), _tm.from_dlpack(v),
@@ -126,6 +129,7 @@ def main():
     ap.add_argument('--warmup', type=int, default=10)
     ap.add_argument('--bsz', type=int, nargs='+', default=[1, 8, 32])
     ap.add_argument('--json-out', default=None)
+    ap.add_argument('--layout-json-out', default=None)
     args = ap.parse_args()
 
     hv, head_dim = 64, 128
@@ -160,16 +164,58 @@ def main():
                 import sys
                 sys.exit(f'gdn correctness gate failed at {mode}')
 
+        # transposed-state gate: the [V,K] variant kernel must reproduce the
+        # [K,V] kernel bit-exactly (same math, same FP order, different
+        # addressing). state_vk holds the same mathematical state as state_kv
+        # in PT pool element order [N, H, V, K].
+        bsz = 2
+        q, k, v, g, beta = make_inputs(bsz, 1, hv, head_dim)
+        state_kv = torch.randn(bsz, hv, head_dim, head_dim, device='cuda', dtype=torch.float32) * 0.1
+        state_vk = state_kv.transpose(-1, -2).contiguous()
+        plan_vk = _tm.delta_rule_plan(_tm.from_dlpack(q), _tm.from_dlpack(k), _tm.from_dlpack(v),
+                                      _tm.from_dlpack(g), _tm.from_dlpack(beta),
+                                      state_dtype='f32', mode='recurrent', state_layout='vk')
+        vk_kernel = plan_vk['kernel'].get('state_layout'), plan_vk['kernel'].get('mode')
+        _, out_kv = run_tm_step(q, k, v, g, beta, state_kv.clone(), 'recurrent', 1, 0, stream, state_layout='kv')
+        _, out_vk = run_tm_step(q, k, v, g, beta, state_vk.clone(), 'recurrent', 1, 0, stream, state_layout='vk')
+        o_err = (out_kv.float() - out_vk.float()).abs().max().item()
+        s_err = (state_kv.transpose(-1, -2) - state_vk).abs().max().item()
+        tag = 'ok' if o_err == 0.0 and s_err == 0.0 else 'MISMATCH'
+        print(f'[gate] state_layout={vk_kernel} out_max_abs={o_err:.3e} final_state_max_abs={s_err:.3e} -> {tag}')
+        if tag != 'ok':
+            import sys
+            sys.exit(f'gdn vk state gate failed: out={o_err} state={s_err}')
+
         # ---- decode: one token per call, recurrent state advanced per step
+        # Three-way comparison per B:
+        #   1. original kernel + [K,V] state (batch-2 baseline)
+        #   2. [V,K] variant kernel + PT pool layout [N,H,V,K] (zero-copy form)
+        #   3. PT fused_recurrent baseline (batch-2 reference)
+        layout_rows = []
         for bsz in args.bsz:
             q, k, v, g, beta = make_inputs(bsz, 1, hv, head_dim)
-            state = torch.randn(bsz, hv, head_dim, head_dim, device='cuda', dtype=torch.float32) * 0.1
-            tm_ms, _ = run_tm_step(q, k, v, g, beta, state, 'recurrent', args.iters, args.warmup, stream)
-            pt_ms = pt_recurrent(q, k, v, g, beta, state, args.iters, args.warmup)
-            row = dict(mode='recurrent', bsz=bsz, tokens=1, tm_ms=round(tm_ms, 5), pt_ms=round(pt_ms, 5),
-                       speedup_pt_over_tm=round(pt_ms / tm_ms, 3))
+            state_kv = torch.randn(bsz, hv, head_dim, head_dim, device='cuda', dtype=torch.float32) * 0.1
+            # [V,K] pool slab per sequence, pointers taken straight off the
+            # tensor: the zero-copy target form for scheme B.
+            state_vk = state_kv.transpose(-1, -2).contiguous()
+            tm_kv_ms, _ = run_tm_step(q, k, v, g, beta, state_kv, 'recurrent', args.iters, args.warmup, stream,
+                                      state_layout='kv')
+            tm_vk_ms, _ = run_tm_step(q, k, v, g, beta, state_vk, 'recurrent', args.iters, args.warmup, stream,
+                                      state_layout='vk')
+            pt_ms = pt_recurrent(q, k, v, g, beta, state_kv, args.iters, args.warmup)
+            row = dict(mode='recurrent', bsz=bsz, tokens=1, layout='kv', tm_ms=round(tm_kv_ms, 5),
+                       pt_ms=round(pt_ms, 5), speedup_pt_over_tm=round(pt_ms / tm_kv_ms, 3))
             rows.append(row)
-            print('decode  B={bsz:>3}  TM {tm_ms:.4f} ms  PT {pt_ms:.4f} ms  PT/TM x{speedup_pt_over_tm}'.format(**row))
+            layout_rows.append(row)
+            row_vk = dict(mode='recurrent', bsz=bsz, tokens=1, layout='vk', tm_ms=round(tm_vk_ms, 5),
+                          pt_ms=round(pt_ms, 5), speedup_pt_over_tm=round(pt_ms / tm_vk_ms, 3),
+                          transpose_penalty_vs_kv=round(tm_vk_ms / tm_kv_ms, 3))
+            rows.append(row_vk)
+            layout_rows.append(row_vk)
+            print('decode  B={bsz:>3}  TM-kv {tm_ms:.4f} ms  TM-vk {tvk:.4f} ms  PT {pt_ms:.4f} ms  '
+                  'vk/kv x{tp}  PT/vk x{sv}'.format(bsz=bsz, tm_ms=tm_kv_ms, tvk=tm_vk_ms, pt_ms=pt_ms,
+                                                    tp=row_vk['transpose_penalty_vs_kv'],
+                                                    sv=row_vk['speedup_pt_over_tm']))
 
         # ---- chunked prefill: T tokens in one call
         for bsz, tokens in ((1, 256), (1, 1024), (8, 256)):
@@ -187,6 +233,10 @@ def main():
         with open(args.json_out, 'w') as f:
             json.dump(rows, f, indent=1)
         print(f'wrote {args.json_out}')
+    if args.layout_json_out:
+        with open(args.layout_json_out, 'w') as f:
+            json.dump(layout_rows, f, indent=1)
+        print(f'wrote {args.layout_json_out}')
 
 
 if __name__ == '__main__':

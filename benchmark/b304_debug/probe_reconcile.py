@@ -1,3 +1,5 @@
+# ruff: noqa: I001, E402, E702
+# ruff: noqa: I001, E402
 # [DEBUG-b304] Reconciliation: the 64-step loop, then BOTH readings of the
 # pool (per-slot value check vs dequant-layer tail measurement) in one process.
 import torch

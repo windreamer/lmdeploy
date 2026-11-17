@@ -1,7 +1,7 @@
 # [DEBUG-b304b] which slots/bytes does the decode kernel's re-store change?
 import sys
 sys.path.insert(0, 'tests/pytorch/kernel')
-import sys; sys.path.insert(0, "tests/pytorch/kernel"); sys.path.insert(0, "../../tests/pytorch/kernel")
+import sys; sys.path.insert(0, 'tests/pytorch/kernel'); sys.path.insert(0, '../../tests/pytorch/kernel')
 from test_tm_int8_kv import (_make_data, _allocate_layout, _bridge_fill, _tm_decode, _dequant_pool, _layer_views, _block_offsets, _cu, BATCH, PREFILL_LEN, KLEN, NUM_BLOCKS, DECODE_STEPS, NUM_KV_HEADS, HEAD_DIM)
 import torch
 BLOCK_LEN = 64

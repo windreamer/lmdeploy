@@ -6,19 +6,33 @@ namespace turbomind::linear_attn::delta_rule {
 
 namespace {
 
-template<GdrMode Mode, DataType InputType, DataType StateType>
+template<GdrMode Mode, DataType InputType, DataType StateType, GdrStateLayout StateLayout = GdrStateLayout::kKV>
 class PreSm90GdrKernel final: public GdrKernel {
 public:
     const GdrKernelSpec& spec() const noexcept override
     {
         static constexpr GdrKernelSpec kSpec{
-            "pre_sm90", Mode, InputType, StateType, 128, Mode == GdrMode::kRecurrent ? 1 : 16};
+            "pre_sm90", Mode, InputType, StateType, 128, Mode == GdrMode::kRecurrent ? 1 : 16, StateLayout};
         return kSpec;
     }
 
     const char* name() const noexcept override
     {
-        if constexpr (Mode == GdrMode::kRecurrent && InputType == kFloat16 && StateType == kFloat16) {
+        if constexpr (StateLayout == GdrStateLayout::kVK && Mode == GdrMode::kRecurrent) {
+            if constexpr (InputType == kFloat16 && StateType == kFloat16) {
+                return "pre_sm90_delta_rule_recurrent_vk_f16_state";
+            }
+            else if constexpr (InputType == kFloat16) {
+                return "pre_sm90_delta_rule_recurrent_vk_f32_state";
+            }
+            else if constexpr (StateType == kBfloat16) {
+                return "pre_sm90_delta_rule_recurrent_vk_bf16_state";
+            }
+            else {
+                return "pre_sm90_delta_rule_recurrent_vk_bf16_f32_state";
+            }
+        }
+        else if constexpr (Mode == GdrMode::kRecurrent && InputType == kFloat16 && StateType == kFloat16) {
             return "pre_sm90_delta_rule_recurrent_f16_state";
         }
         else if constexpr (Mode == GdrMode::kRecurrent && InputType == kFloat16) {
@@ -56,7 +70,21 @@ public:
 
     void Run(const Arguments& args, const delta_rule::Plan& plan, cudaStream_t stream) const override
     {
-        if constexpr (Mode == GdrMode::kRecurrent && InputType == kFloat16 && StateType == kFloat16) {
+        if constexpr (StateLayout == GdrStateLayout::kVK && Mode == GdrMode::kRecurrent) {
+            if constexpr (InputType == kFloat16 && StateType == kFloat16) {
+                detail::RunPreSm90RecurrentVkF16F16(args, plan, stream);
+            }
+            else if constexpr (InputType == kFloat16) {
+                detail::RunPreSm90RecurrentVkF16F32(args, plan, stream);
+            }
+            else if constexpr (StateType == kBfloat16) {
+                detail::RunPreSm90RecurrentVkBf16Bf16(args, plan, stream);
+            }
+            else {
+                detail::RunPreSm90RecurrentVkBf16F32(args, plan, stream);
+            }
+        }
+        else if constexpr (Mode == GdrMode::kRecurrent && InputType == kFloat16 && StateType == kFloat16) {
             detail::RunPreSm90RecurrentF16F16(args, plan, stream);
         }
         else if constexpr (Mode == GdrMode::kRecurrent && InputType == kFloat16) {
@@ -92,6 +120,10 @@ Registrar reg([](Collector& c) {
     c.add<PreSm90GdrKernel<GdrMode::kRecurrent, kBfloat16, kFloat32>>();
     c.add<PreSm90GdrKernel<GdrMode::kChunked, kBfloat16, kBfloat16>>();
     c.add<PreSm90GdrKernel<GdrMode::kChunked, kBfloat16, kFloat32>>();
+    c.add<PreSm90GdrKernel<GdrMode::kRecurrent, kFloat16, kFloat16, GdrStateLayout::kVK>>();
+    c.add<PreSm90GdrKernel<GdrMode::kRecurrent, kFloat16, kFloat32, GdrStateLayout::kVK>>();
+    c.add<PreSm90GdrKernel<GdrMode::kRecurrent, kBfloat16, kBfloat16, GdrStateLayout::kVK>>();
+    c.add<PreSm90GdrKernel<GdrMode::kRecurrent, kBfloat16, kFloat32, GdrStateLayout::kVK>>();
 });
 
 }  // namespace

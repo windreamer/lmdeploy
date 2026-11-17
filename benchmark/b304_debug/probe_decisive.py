@@ -1,3 +1,5 @@
+# ruff: noqa: I001, E402, E702
+# ruff: noqa: I001, E402
 # [DEBUG-b304] Decisive cells:
 #   d1: mixed-chain replica with FP32 params (isolate dtype from T-per-call/values)
 #   d2: mixed-chain replica with BF16 params (control, expect RED)

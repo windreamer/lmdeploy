@@ -1,3 +1,5 @@
+# ruff: noqa: I001, E402, E702
+# ruff: noqa: I001, E402
 # [DEBUG-b304] Per-step pool diff over the mixed-chain loop: find the FIRST
 # step whose write leaves its expected slot set (blocks {4b+3}, slot step%64).
 import torch

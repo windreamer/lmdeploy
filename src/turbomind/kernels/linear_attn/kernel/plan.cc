@@ -32,7 +32,7 @@ bool MatchesGdrSpec(const GdrKernelSpec& spec, const Operation& operation, const
                                                                             operation.chunk_size;
     return operation.mode == spec.mode && context.input_dtype == spec.input_dtype
            && context.state_dtype == spec.state_dtype && context.head_dim == spec.head_dim
-           && requested_chunk == spec.chunk_size
+           && requested_chunk == spec.chunk_size && operation.state_layout == spec.state_layout
            && (operation.mode != GdrMode::kRecurrent || operation.chunk_size == kAutoGdrChunkSize
                || operation.chunk_size == kRecurrentGdrChunkSize);
 }

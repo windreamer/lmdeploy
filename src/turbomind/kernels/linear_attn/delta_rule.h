@@ -19,6 +19,16 @@ enum class GdrMode
     kChunked
 };
 
+// Addressing of element (k, v) inside a per-head state slab:
+// - kKV: k-major [K][V], the TM native recurrent layout.
+// - kVK: v-major [V][K], matching a PyTorch state pool indexed as [N, H, V, K].
+//   It lets the kernel read and write pool slabs in place without a transpose.
+enum class GdrStateLayout
+{
+    kKV,
+    kVK
+};
+
 constexpr int kAutoGdrChunkSize      = 0;
 constexpr int kRecurrentGdrChunkSize = 1;
 
@@ -30,18 +40,20 @@ enum class ContextParallelLevel : int
 };
 
 struct GdrKernelSpec {
-    const char* architecture{};
-    GdrMode     mode{};
-    DataType    input_dtype{kNull};
-    DataType    state_dtype{kNull};
-    int         head_dim{};
-    int         chunk_size{};
+    const char*    architecture{};
+    GdrMode        mode{};
+    DataType       input_dtype{kNull};
+    DataType       state_dtype{kNull};
+    int            head_dim{};
+    int            chunk_size{};
+    GdrStateLayout state_layout{GdrStateLayout::kKV};
 };
 
 struct Operation {
     GdrMode              mode{GdrMode::kChunked};
     int                  chunk_size{kAutoGdrChunkSize};
     ContextParallelLevel cp_level{ContextParallelLevel::kAll};
+    GdrStateLayout       state_layout{GdrStateLayout::kKV};
 };
 
 struct PlanningContext {

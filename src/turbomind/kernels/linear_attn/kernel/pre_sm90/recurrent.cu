@@ -11,7 +11,7 @@
 
 namespace turbomind::linear_attn::delta_rule::detail {
 
-template<int HeadDim, int BlockDim, class T, class StateT>
+template<int HeadDim, int BlockDim, class T, class StateT, GdrStateLayout StateLayout>
 __global__ __launch_bounds__(BlockDim, 2) void RecurrentGdrKernel(T*             out,
                                                                   int64_t        out_batch_stride,
                                                                   const T*       q,
@@ -37,8 +37,12 @@ __global__ __launch_bounds__(BlockDim, 2) void RecurrentGdrKernel(T*            
     constexpr int k_threads = HeadDim / tile_k;
     constexpr int v_threads = BlockDim / k_threads;
     constexpr int v_iters   = (HeadDim / tile_v + v_threads - 1) / v_threads;
-    const int     offset_k  = threadIdx.x % k_threads;
-    const int     offset_v  = threadIdx.x / k_threads;
+    // The [V][K] slab has no slack rows: every v index produced below must be
+    // a real row, otherwise state loads and stores run off the slab.
+    static_assert(StateLayout == GdrStateLayout::kKV || HeadDim % (tile_v * v_threads) == 0,
+                  "transposed state layout requires an exact tile fit");
+    const int offset_k = threadIdx.x % k_threads;
+    const int offset_v = threadIdx.x / k_threads;
 
     for (int work_idx = int(blockIdx.x); work_idx < total_work; work_idx += int(gridDim.x)) {
         const int sequence   = work_idx / hv;
@@ -54,97 +58,188 @@ __global__ __launch_bounds__(BlockDim, 2) void RecurrentGdrKernel(T*            
             reinterpret_cast<StateT*>(static_cast<uintptr_t>(state_ptrs[sequence * num_head_groups + head_group]))
             + state_layer_offset + int64_t(local_head) * HeadDim * HeadDim;
 
-        Array<float, tile_v> vec_S[v_iters][tile_k];
-        PRAGMA_UNROLL
-        for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
-            PRAGMA_UNROLL
-            for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
-                Array<StateT, tile_v> tmp;
-                Load(tmp, &state[(offset_k * tile_k + k_idx) * HeadDim + (offset_v + v_iter * v_threads) * tile_v]);
-                vec_S[v_iter][k_idx] = cast<float>(tmp);
-            }
-        }
-
-        const float beta_value = beta[int64_t(sequence) * gate_batch_stride + value_head];
-        const float decay      = expf(g[int64_t(sequence) * gate_batch_stride + value_head]);
-
-        Array<float, tile_k> vec_k;
-        Array<float, tile_k> vec_q;
-        Array<T, tile_k>     tmp_k;
-        Array<T, tile_k>     tmp_q;
-        Load(tmp_k, &k_ptr[offset_k * tile_k]);
-        Load(tmp_q, &q_ptr[offset_k * tile_k]);
-        vec_k = cast<float>(tmp_k);
-        vec_q = cast<float>(tmp_q);
-
-        float kq = 0.f;
-        PRAGMA_UNROLL
-        for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
-            kq += vec_k[k_idx] * vec_q[k_idx];
-        }
-        PRAGMA_UNROLL
-        for (int mask = k_threads / 2; mask > 0; mask /= 2) {
-            kq += __shfl_xor_sync(0xffffffff, kq, mask);
-        }
-
-        Array<T, tile_v> vec_v[v_iters];
-        PRAGMA_UNROLL
-        for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
-            Load(vec_v[v_iter], &v_ptr[(offset_v + v_iter * v_threads) * tile_v]);
-        }
-
-        PRAGMA_UNROLL
-        for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
-            Array<T, tile_v> vec_out;
-            PRAGMA_UNROLL
-            for (int v_idx = 0; v_idx < tile_v; ++v_idx) {
-                float kv_memory = 0.f;
-                float sq        = 0.f;
-                PRAGMA_UNROLL
-                for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
-                    const float s_decayed       = vec_S[v_iter][k_idx][v_idx] * decay;
-                    vec_S[v_iter][k_idx][v_idx] = s_decayed;
-                    kv_memory += s_decayed * vec_k[k_idx];
-                    sq += s_decayed * vec_q[k_idx];
-                }
-                PRAGMA_UNROLL
-                for (int mask = k_threads / 2; mask > 0; mask /= 2) {
-                    kv_memory += __shfl_xor_sync(0xffffffff, kv_memory, mask);
-                    sq += __shfl_xor_sync(0xffffffff, sq, mask);
-                }
-                const float delta = (float(vec_v[v_iter][v_idx]) - kv_memory) * beta_value;
-                PRAGMA_UNROLL
-                for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
-                    vec_S[v_iter][k_idx][v_idx] += vec_k[k_idx] * delta;
-                }
-                vec_out[v_idx] = T((sq + delta * kq) * rsqrtf(float(HeadDim)));
-            }
-            if (offset_k == 0) {
-                Store(&out_ptr[(offset_v + v_iter * v_threads) * tile_v], vec_out);
-            }
-        }
-
-        if (!finished[sequence]) {
+        if constexpr (StateLayout == GdrStateLayout::kKV) {
+            Array<float, tile_v> vec_S[v_iters][tile_k];
             PRAGMA_UNROLL
             for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
                 PRAGMA_UNROLL
                 for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
-                    auto tmp = cast<StateT>(vec_S[v_iter][k_idx]);
-                    Store(&state[(offset_k * tile_k + k_idx) * HeadDim + (offset_v + v_iter * v_threads) * tile_v],
-                          tmp);
+                    Array<StateT, tile_v> tmp;
+                    Load(tmp, &state[(offset_k * tile_k + k_idx) * HeadDim + (offset_v + v_iter * v_threads) * tile_v]);
+                    vec_S[v_iter][k_idx] = cast<float>(tmp);
+                }
+            }
+
+            const float beta_value = beta[int64_t(sequence) * gate_batch_stride + value_head];
+            const float decay      = expf(g[int64_t(sequence) * gate_batch_stride + value_head]);
+
+            Array<float, tile_k> vec_k;
+            Array<float, tile_k> vec_q;
+            Array<T, tile_k>     tmp_k;
+            Array<T, tile_k>     tmp_q;
+            Load(tmp_k, &k_ptr[offset_k * tile_k]);
+            Load(tmp_q, &q_ptr[offset_k * tile_k]);
+            vec_k = cast<float>(tmp_k);
+            vec_q = cast<float>(tmp_q);
+
+            float kq = 0.f;
+            PRAGMA_UNROLL
+            for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
+                kq += vec_k[k_idx] * vec_q[k_idx];
+            }
+            PRAGMA_UNROLL
+            for (int mask = k_threads / 2; mask > 0; mask /= 2) {
+                kq += __shfl_xor_sync(0xffffffff, kq, mask);
+            }
+
+            Array<T, tile_v> vec_v[v_iters];
+            PRAGMA_UNROLL
+            for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
+                Load(vec_v[v_iter], &v_ptr[(offset_v + v_iter * v_threads) * tile_v]);
+            }
+
+            PRAGMA_UNROLL
+            for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
+                Array<T, tile_v> vec_out;
+                PRAGMA_UNROLL
+                for (int v_idx = 0; v_idx < tile_v; ++v_idx) {
+                    float kv_memory = 0.f;
+                    float sq        = 0.f;
+                    PRAGMA_UNROLL
+                    for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
+                        const float s_decayed       = vec_S[v_iter][k_idx][v_idx] * decay;
+                        vec_S[v_iter][k_idx][v_idx] = s_decayed;
+                        kv_memory += s_decayed * vec_k[k_idx];
+                        sq += s_decayed * vec_q[k_idx];
+                    }
+                    PRAGMA_UNROLL
+                    for (int mask = k_threads / 2; mask > 0; mask /= 2) {
+                        kv_memory += __shfl_xor_sync(0xffffffff, kv_memory, mask);
+                        sq += __shfl_xor_sync(0xffffffff, sq, mask);
+                    }
+                    const float delta = (float(vec_v[v_iter][v_idx]) - kv_memory) * beta_value;
+                    PRAGMA_UNROLL
+                    for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
+                        vec_S[v_iter][k_idx][v_idx] += vec_k[k_idx] * delta;
+                    }
+                    vec_out[v_idx] = T((sq + delta * kq) * rsqrtf(float(HeadDim)));
+                }
+                if (offset_k == 0) {
+                    Store(&out_ptr[(offset_v + v_iter * v_threads) * tile_v], vec_out);
+                }
+            }
+
+            if (!finished[sequence]) {
+                PRAGMA_UNROLL
+                for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
+                    PRAGMA_UNROLL
+                    for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
+                        auto tmp = cast<StateT>(vec_S[v_iter][k_idx]);
+                        Store(&state[(offset_k * tile_k + k_idx) * HeadDim + (offset_v + v_iter * v_threads) * tile_v],
+                              tmp);
+                    }
+                }
+            }
+        }
+        else {
+            // [V][K] slab: element (k, v) sits at v * HeadDim + k. Registers
+            // follow that order (Array<float, tile_k> per v row), so each load
+            // and store covers tile_k contiguous elements and needs no
+            // transpose against the PyTorch pool layout.
+            static_assert(v_threads * tile_v * v_iters == HeadDim);
+            Array<float, tile_k> vec_S[v_iters][tile_v];
+            PRAGMA_UNROLL
+            for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
+                PRAGMA_UNROLL
+                for (int v_idx = 0; v_idx < tile_v; ++v_idx) {
+                    const int             v_global = (offset_v + v_iter * v_threads) * tile_v + v_idx;
+                    Array<StateT, tile_k> tmp;
+                    Load(tmp, &state[v_global * HeadDim + offset_k * tile_k]);
+                    vec_S[v_iter][v_idx] = cast<float>(tmp);
+                }
+            }
+
+            const float beta_value = beta[int64_t(sequence) * gate_batch_stride + value_head];
+            const float decay      = expf(g[int64_t(sequence) * gate_batch_stride + value_head]);
+
+            Array<float, tile_k> vec_k;
+            Array<float, tile_k> vec_q;
+            Array<T, tile_k>     tmp_k;
+            Array<T, tile_k>     tmp_q;
+            Load(tmp_k, &k_ptr[offset_k * tile_k]);
+            Load(tmp_q, &q_ptr[offset_k * tile_k]);
+            vec_k = cast<float>(tmp_k);
+            vec_q = cast<float>(tmp_q);
+
+            float kq = 0.f;
+            PRAGMA_UNROLL
+            for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
+                kq += vec_k[k_idx] * vec_q[k_idx];
+            }
+            PRAGMA_UNROLL
+            for (int mask = k_threads / 2; mask > 0; mask /= 2) {
+                kq += __shfl_xor_sync(0xffffffff, kq, mask);
+            }
+
+            Array<T, tile_v> vec_v[v_iters];
+            PRAGMA_UNROLL
+            for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
+                Load(vec_v[v_iter], &v_ptr[(offset_v + v_iter * v_threads) * tile_v]);
+            }
+
+            PRAGMA_UNROLL
+            for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
+                Array<T, tile_v> vec_out;
+                PRAGMA_UNROLL
+                for (int v_idx = 0; v_idx < tile_v; ++v_idx) {
+                    float kv_memory = 0.f;
+                    float sq        = 0.f;
+                    PRAGMA_UNROLL
+                    for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
+                        const float s_decayed       = vec_S[v_iter][v_idx][k_idx] * decay;
+                        vec_S[v_iter][v_idx][k_idx] = s_decayed;
+                        kv_memory += s_decayed * vec_k[k_idx];
+                        sq += s_decayed * vec_q[k_idx];
+                    }
+                    PRAGMA_UNROLL
+                    for (int mask = k_threads / 2; mask > 0; mask /= 2) {
+                        kv_memory += __shfl_xor_sync(0xffffffff, kv_memory, mask);
+                        sq += __shfl_xor_sync(0xffffffff, sq, mask);
+                    }
+                    const float delta = (float(vec_v[v_iter][v_idx]) - kv_memory) * beta_value;
+                    PRAGMA_UNROLL
+                    for (int k_idx = 0; k_idx < tile_k; ++k_idx) {
+                        vec_S[v_iter][v_idx][k_idx] += vec_k[k_idx] * delta;
+                    }
+                    vec_out[v_idx] = T((sq + delta * kq) * rsqrtf(float(HeadDim)));
+                }
+                if (offset_k == 0) {
+                    Store(&out_ptr[(offset_v + v_iter * v_threads) * tile_v], vec_out);
+                }
+            }
+
+            if (!finished[sequence]) {
+                PRAGMA_UNROLL
+                for (int v_iter = 0; v_iter < v_iters; ++v_iter) {
+                    PRAGMA_UNROLL
+                    for (int v_idx = 0; v_idx < tile_v; ++v_idx) {
+                        const int v_global = (offset_v + v_iter * v_threads) * tile_v + v_idx;
+                        auto      tmp      = cast<StateT>(vec_S[v_iter][v_idx]);
+                        Store(&state[v_global * HeadDim + offset_k * tile_k], tmp);
+                    }
                 }
             }
         }
     }
 }
 
-template<class T, class StateT>
+template<class T, class StateT, GdrStateLayout StateLayout = GdrStateLayout::kKV>
 void RunPreSm90Recurrent(const Arguments& args, const Plan& plan, cudaStream_t stream)
 {
     constexpr int kBlockDim  = 256;
     const int     total_work = plan.problem.sequence_num * plan.problem.hv;
     const int     grid       = std::min(total_work, std::max(plan.problem.sm_count, 1) * 4);
-    RecurrentGdrKernel<128, kBlockDim, T, StateT>
+    RecurrentGdrKernel<128, kBlockDim, T, StateT, StateLayout>
         <<<grid, kBlockDim, 0, stream>>>(args.out->data<T>(),
                                          args.out->stride(0),
                                          args.q.data<T>(),
@@ -177,6 +272,20 @@ DEFINE_PRE_SM90_CALLBACK(RunPreSm90RecurrentF16F16, RunPreSm90Recurrent, half, h
 DEFINE_PRE_SM90_CALLBACK(RunPreSm90RecurrentF16F32, RunPreSm90Recurrent, half, float)
 DEFINE_PRE_SM90_CALLBACK(RunPreSm90RecurrentBf16Bf16, RunPreSm90Recurrent, __nv_bfloat16, __nv_bfloat16)
 DEFINE_PRE_SM90_CALLBACK(RunPreSm90RecurrentBf16F32, RunPreSm90Recurrent, __nv_bfloat16, float)
+
+// [V][K] state layout variants, selected through Operation::state_layout.
+#define DEFINE_PRE_SM90_CALLBACK_VK(name, InputT, StateT)                                                              \
+    void name(const Arguments& args, const Plan& plan, cudaStream_t stream)                                            \
+    {                                                                                                                  \
+        RunPreSm90Recurrent<InputT, StateT, GdrStateLayout::kVK>(args, plan, stream);                                  \
+    }
+
+DEFINE_PRE_SM90_CALLBACK_VK(RunPreSm90RecurrentVkF16F16, half, half)
+DEFINE_PRE_SM90_CALLBACK_VK(RunPreSm90RecurrentVkF16F32, half, float)
+DEFINE_PRE_SM90_CALLBACK_VK(RunPreSm90RecurrentVkBf16Bf16, __nv_bfloat16, __nv_bfloat16)
+DEFINE_PRE_SM90_CALLBACK_VK(RunPreSm90RecurrentVkBf16F32, __nv_bfloat16, float)
+
+#undef DEFINE_PRE_SM90_CALLBACK_VK
 
 #undef DEFINE_PRE_SM90_CALLBACK
 

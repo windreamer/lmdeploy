@@ -153,12 +153,13 @@ const char* ToString(GdrMode mode)
 py::dict KernelSpecToDict(const GdrKernelSpec& spec)
 {
     py::dict out;
-    out["arch"]        = spec.architecture;
-    out["mode"]        = ToString(spec.mode);
-    out["input_dtype"] = to_string(spec.input_dtype);
-    out["state_dtype"] = to_string(spec.state_dtype);
-    out["head_dim"]    = spec.head_dim;
-    out["chunk_size"]  = spec.chunk_size;
+    out["arch"]         = spec.architecture;
+    out["mode"]         = ToString(spec.mode);
+    out["input_dtype"]  = to_string(spec.input_dtype);
+    out["state_dtype"]  = to_string(spec.state_dtype);
+    out["head_dim"]     = spec.head_dim;
+    out["chunk_size"]   = spec.chunk_size;
+    out["state_layout"] = spec.state_layout == GdrStateLayout::kVK ? "vk" : "kv";
     return out;
 }
 
@@ -215,9 +216,21 @@ DataType ParseStateDtype(const std::string& dtype)
     throw py::value_error("state_dtype must be one of: f16, float16, f32, float32, bf16, bfloat16");
 }
 
-Operation MakeOperation(GdrMode mode, std::optional<int> chunk_size, ContextParallelLevel cp_level)
+GdrStateLayout ParseStateLayout(const std::string& layout)
 {
-    return Operation{mode, chunk_size.value_or(kAutoGdrChunkSize), cp_level};
+    if (layout == "kv") {
+        return GdrStateLayout::kKV;
+    }
+    if (layout == "vk") {
+        return GdrStateLayout::kVK;
+    }
+    throw py::value_error("state_layout must be one of: kv, vk");
+}
+
+Operation
+MakeOperation(GdrMode mode, std::optional<int> chunk_size, ContextParallelLevel cp_level, GdrStateLayout state_layout)
+{
+    return Operation{mode, chunk_size.value_or(kAutoGdrChunkSize), cp_level, state_layout};
 }
 
 PlanningContext MakePlanningContext(const core::Tensor& q,
@@ -318,7 +331,8 @@ py::dict PlanBridge(const py::object&  q,
                     std::optional<int> chunk_size,
                     const std::string& cp_level,
                     int                num_head_groups,
-                    int                heads_per_block)
+                    int                heads_per_block,
+                    const std::string& state_layout)
 {
     const auto q_tensor         = TensorFromObject(q, "q", true);
     const auto k_tensor         = TensorFromObject(k, "k", true);
@@ -331,8 +345,9 @@ py::dict PlanBridge(const py::object&  q,
 
     const auto parsed_mode        = ParseMode(mode);
     const auto parsed_state_dtype = ParseStateDtype(state_dtype);
-    const auto operation          = MakeOperation(parsed_mode, chunk_size, ParseContextParallelLevel(cp_level));
-    const auto context            = MakePlanningContext(q_tensor,
+    const auto parsed_layout      = ParseStateLayout(state_layout);
+    const auto operation = MakeOperation(parsed_mode, chunk_size, ParseContextParallelLevel(cp_level), parsed_layout);
+    const auto context   = MakePlanningContext(q_tensor,
                                              v_tensor,
                                              g_tensor,
                                              beta_tensor,
@@ -444,7 +459,8 @@ void bind_delta_rule(py::module_& module)
                "chunk_size"_a      = py::none(),
                "cp_level"_a        = "all",
                "num_head_groups"_a = 1,
-               "heads_per_block"_a = 0);
+               "heads_per_block"_a = 0,
+               "state_layout"_a    = "kv");
 
     module.def("delta_rule_prepare_state_tma_descs",
                &PrepareStateTmaDescBridge,

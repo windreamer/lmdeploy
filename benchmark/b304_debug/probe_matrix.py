@@ -1,3 +1,5 @@
+# ruff: noqa: I001, E402, E702
+# ruff: noqa: I001, E402
 # [DEBUG-b304] Geometry/dtype matrix for the fill_kv_cache_tm multi-batch bug.
 # Each case writes unique constant tokens (byte-exact readback) and reports
 # per-slot placement. Cut one variable at a time from the green probe
