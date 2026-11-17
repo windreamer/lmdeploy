@@ -64,7 +64,7 @@ def main():
     k_cache = C_.layer_views(pool)[0]
 
     # ---- graph_torch: tables + trivial torch op --------------------------
-    bo = C_.block_offsets()
+    C_.block_offsets()
     sink = torch.zeros(C_.BATCH, C_.NUM_HEADS * C_.HEAD_DIM, dtype=torch.bfloat16, device='cuda')
     q_const = torch.ones(C_.BATCH, C_.NUM_HEADS * C_.HEAD_DIM, dtype=torch.bfloat16, device='cuda')
 

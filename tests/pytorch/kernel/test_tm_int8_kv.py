@@ -135,7 +135,6 @@ def _assert_code_match(pool, k_src, v_src, label, floor=0.99):
     green: 0.67% correct placement under passing budgets)."""
     got_k, got_v = _pool_codes(pool)
     h2sd = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
-    codes_all = pool[..., :h2sd].view(pool.shape[0], NUM_BLOCKS, NUM_KV_HEADS, 2, BLOCK_LEN, HEAD_DIM)
     params_all = pool[..., h2sd:].view(torch.bfloat16).view(pool.shape[0], NUM_BLOCKS, NUM_KV_HEADS, 2,
                                                             BLOCK_LEN, 2).float()
 
@@ -1328,3 +1327,130 @@ def test_tm_write_fill_is_capture_safe():
     assert torch.equal(pool_cap.pools[0].tensor, pool_ref.pools[0].tensor), \
         'captured TM fill diverges from the eager fill'
     _assert_code_match(pool_cap.pools[0].tensor, k[:, :PREFILL_LEN], v[:, :PREFILL_LEN], 'captured-tm-writer/codes')
+
+
+# ---------------------------------------------------------------------------
+# B3-08: resident write-plan cache for the TM fused write host path. The
+# cache must (a) hit in steady state with zero device allocation, (b) stay
+# int32 end to end on the cumulative arrays, (c) invalidate when the pool
+# lifecycle ends — including the data_ptr-reuse case the caching allocator
+# can produce — and (d) key distinct geometries into distinct entries.
+# ---------------------------------------------------------------------------
+
+
+def _fill_rows(pool_views, k_rows, v_rows, q_lens, kv_lens, boff=None):
+    """One `tm_process_kv_fill` append with engine-shaped (int64, device)
+    metadata tensors."""
+    from lmdeploy.pytorch.backends.tm_kv import tm_process_kv_fill
+    k_cache, v_cache = pool_views[0], pool_views[1]
+    ql = torch.tensor(q_lens, dtype=torch.long, device='cuda')
+    kl = torch.tensor(kv_lens, dtype=torch.long, device='cuda')
+    tm_process_kv_fill(k_rows, v_rows, k_cache, v_cache, ql, kl,
+                       _block_offsets() if boff is None else boff,
+                       max_q_len=max(q_lens))
+
+
+def test_tm_write_plan_cache_hit_and_zero_alloc():
+    """Steady-state fill hits one cached plan: same buffer objects, int32 cu
+    arrays intact, no device allocation on the hit path, pool bytes exact."""
+    from lmdeploy.pytorch.backends import tm_kv
+
+    tm_kv.reset_tm_write_cache()
+    _, k, v = _make_data()
+    alloc = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    views = _layer_views(alloc, 0)
+    kr = k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    vr = v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    q_lens = [PREFILL_LEN] * BATCH
+
+    _fill_rows(views, kr, vr, q_lens, q_lens)  # cold: builds the plan
+    torch.cuda.synchronize()
+    plans = list(tm_kv._TM_WRITE_PLANS.values())
+    assert len(plans) == 1, f'expected one plan entry, got {len(plans)}'
+    plan = plans[0]
+    assert plan.cu.dtype == torch.int32 and plan.lens.dtype == torch.int32
+    assert plan.ptrs.dtype == torch.int64
+    assert plan.owner() is views[0]
+
+    mark = torch.cuda.memory_allocated()
+    _fill_rows(views, kr, vr, q_lens, q_lens)  # warm: must hit
+    torch.cuda.synchronize()
+    assert torch.cuda.memory_allocated() == mark, 'steady-state fill allocated device memory'
+    assert list(tm_kv._TM_WRITE_PLANS.values()) == [plan], 'hit must reuse the same plan'
+    assert plan.ptrs.data_ptr() != 0
+    # Pointer values must be true 64-bit addresses (guards the addcmul
+    # int32-promotion truncation the sentinel tests alone could miss).
+    from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
+    ref_ptrs, ref_bases = tm_block_pointer_table(_block_offsets(), views[0].data_ptr(),
+                                                 views[0].stride(0))
+    assert torch.equal(plan.ptrs, ref_ptrs), 'pointer table diverges from reference build'
+    assert torch.equal(plan.bases, ref_bases), 'cu_block_base diverges from reference build'
+    _assert_code_match(alloc.pools[0].tensor, k[:, :PREFILL_LEN], v[:, :PREFILL_LEN],
+                       'cached-fill/codes')
+    tm_kv.reset_tm_write_cache()
+
+
+def test_tm_write_plan_rebuild_after_pool_rebuild():
+    """Freeing the pool must orphan its plan; a rebuilt pool at the same
+    data_ptr (allocator reuse) must not inherit the stale entry — the new fill
+    gets fresh buffers and lands in the new pool only."""
+    from lmdeploy.pytorch.backends import tm_kv
+
+    tm_kv.reset_tm_write_cache()
+    _, k, v = _make_data()
+    kr = k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    vr = v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    q_lens = [PREFILL_LEN] * BATCH
+
+    alloc_a = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    views_a = _layer_views(alloc_a, 0)
+    _fill_rows(views_a, kr, vr, q_lens, q_lens)
+    torch.cuda.synchronize()
+    plan_a = list(tm_kv._TM_WRITE_PLANS.values())[0]
+    plan_a_id = id(plan_a)
+
+    del alloc_a, views_a, plan_a
+    import gc
+    gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()  # let the allocator hand the block back
+
+    alloc_b = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    views_b = _layer_views(alloc_b, 0)
+    _fill_rows(views_b, kr, vr, q_lens, q_lens)
+    torch.cuda.synchronize()
+    plans = list(tm_kv._TM_WRITE_PLANS.values())
+    assert plans and all(id(p) != plan_a_id for p in plans), \
+        'rebuilt pool must not inherit the stale plan'
+    assert all(p.owner() is not None for p in plans), 'no dead-pool entry may survive into service'
+    plan_b = [p for p in plans if p.owner() is views_b[0]]
+    assert len(plan_b) == 1, 'the new pool must own exactly one plan'
+    # The kernel reads the table through the plan; fresh buffers mean no
+    # dangling writes into the freed allocation.
+    _assert_code_match(alloc_b.pools[0].tensor, k[:, :PREFILL_LEN], v[:, :PREFILL_LEN],
+                       'rebuilt-pool/codes')
+    tm_kv.reset_tm_write_cache()
+
+
+def test_tm_write_plan_per_geometry_entries():
+    """Different batch geometry on the same pool gets its own entry, and both
+    entries stay correct; same geometry hits the same entry."""
+    from lmdeploy.pytorch.backends import tm_kv
+
+    tm_kv.reset_tm_write_cache()
+    _, k, v = _make_data()
+    alloc = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    views = _layer_views(alloc, 0)
+    kr = k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    vr = v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM).contiguous()
+    q_lens = [PREFILL_LEN] * BATCH
+
+    _fill_rows(views, kr, vr, q_lens, q_lens)
+    _fill_rows(views, kr, vr, q_lens, q_lens,
+               boff=_block_offsets()[:, :3])  # same pool, narrower (C=3) table
+    torch.cuda.synchronize()
+    assert len(tm_kv._TM_WRITE_PLANS) == 2, \
+        f'distinct geometry must own a distinct plan, got {len(tm_kv._TM_WRITE_PLANS)}'
+    _assert_code_match(alloc.pools[0].tensor, k[:, :PREFILL_LEN], v[:, :PREFILL_LEN],
+                       'per-geometry/codes')
+    tm_kv.reset_tm_write_cache()

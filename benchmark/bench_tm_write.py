@@ -131,7 +131,6 @@ def tm_write(k_rows, v_rows, cu_q, cu_k, base, max_q_len, ptrs):
 def host_write(pool, base, k, v, ti0, ti1):
     """Fp32 reference straight into the pool under the (scale, min)
     contract."""
-    bb = block_bytes()
     data = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
     for b in range(k.shape[0]):
         for ti in range(ti0, ti1):
@@ -146,7 +145,9 @@ def host_write(pool, base, k, v, ti0, ti1):
                     pool[e, off:off + HEAD_DIM] = codes
                     poff = data + h * 2 * BLOCK_LEN * 4 + \
                         (0 if name == 'k' else BLOCK_LEN * 4) + s * 4
-                    pool[e, poff:poff + 4] = torch.stack([scale.flatten(), lo.flatten()]).reshape(2).bfloat16().view(torch.uint8)
+                    pack = torch.stack([scale.flatten(), lo.flatten()]).reshape(2)
+                    pack = pack.bfloat16().view(torch.uint8)
+                    pool[e, poff:poff + pack.numel()] = pack
 
 
 class PtWriter:
@@ -172,7 +173,6 @@ class PtWriter:
             quant_policy=QuantPolicy.INT8, kv_layout='bshd')
 
     def transcribe(self, pool, base, bsz, ti0, ti1):
-        bb = block_bytes()
         data = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
         for b in range(bsz):
             for ti in range(ti0, ti1):
@@ -186,10 +186,14 @@ class PtWriter:
                     pool[e, off:off + HEAD_DIM] = self.vc[e, s, h]
                     scale, zero = self.ksz[e, s, h, 0], self.ksz[e, s, h, 1]
                     poff = data + h * 2 * BLOCK_LEN * 4 + s * 4
-                    pool[e, poff:poff + 4] = torch.stack([scale.flatten(), (-scale * zero).flatten()]).reshape(2).bfloat16().view(torch.uint8)
+                    pack = torch.stack([scale.flatten(), (-scale * zero).flatten()]).reshape(2)
+                    pack = pack.bfloat16().view(torch.uint8)
+                    pool[e, poff:poff + pack.numel()] = pack
                     scale, zero = self.vsz[e, s, h, 0], self.vsz[e, s, h, 1]
                     poff = data + h * 2 * BLOCK_LEN * 4 + BLOCK_LEN * 4 + s * 4
-                    pool[e, poff:poff + 4] = torch.stack([scale.flatten(), (-scale * zero).flatten()]).reshape(2).bfloat16().view(torch.uint8)
+                    pack = torch.stack([scale.flatten(), (-scale * zero).flatten()]).reshape(2)
+                    pack = pack.bfloat16().view(torch.uint8)
+                    pool[e, poff:poff + pack.numel()] = pack
 
 
 # ---------------------------------------------------------- verification

@@ -33,6 +33,7 @@ Opt-in gating lives in three pieces that must agree:
 """
 
 import os
+import weakref
 from dataclasses import dataclass
 
 import torch
@@ -245,7 +246,6 @@ class TmInt8BlockCacheLayout:
         num_layers = self.num_layers
         h, s, d = self.num_kv_heads, self.block_len, self.head_dim
         data_bytes = 2 * h * s * d
-        param_bytes = 2 * h * s * 2 * self.param_dtype.itemsize
         pool = torch.zeros((num_layers, num_blocks, self.block_nbytes), dtype=torch.uint8, device=device)
 
         # block::Layout arrangement: per head a [K | V] code pair followed by
@@ -352,6 +352,124 @@ def fill_kv_cache_tm(key: torch.Tensor,
         params[block_ids, token_in_block] = torch.where(keep, param_pair, old_params)
 
 
+@dataclass
+class _TmWritePlan:
+    """Resident device buffers for one (pool-layer view, batch geometry) pair,
+    shared by every steady-state call of `tm_process_kv_fill`.
+
+    Host-side construction of these buffers (cumulative-length arrays,
+    sequence-major pointer table) dominated the fill call at ~150us/step
+    (B3-07 data). They are stable across steps at the byte level — only
+    their *content* changes per step — so the cache keeps them alive and the
+    fill rewrites content with device-side ops. Steady state allocates
+    nothing, which also keeps the path usable under CUDA graph capture.
+
+    Layout for the per-step rewrite (5 dispatches):
+
+    - `lens` (2, B) int32 staging rows: q_seqlens / kv_seqlens pinned to the
+      binding's `const int*` width in one place;
+    - `cu` (2, B+1) int32: column 0 stays 0; one fused `cumsum(dim=1)` scan
+      fills row 0 = cu_q_len, row 1 = cu_k_len (two separate scans cost a
+      second dispatch; both rows are contiguous, so their row pointers feed
+      the binding directly);
+    - `ptrs` int64 (B*C): pointer table regenerated per step by a single
+      `addcmul` = pool_base + block_id * block_bytes from the live block
+      ids. `ids` is a persistent int64 staging of `block_offsets`: without
+      it the strong int32 ids + weak 0-d int64 scalar promote the whole
+      `addcmul` to int32, silently truncating 64-bit pool addresses (the
+      mirror image of the B3-07 int64 cu defect — caught by the pool
+      sentinel/collateral tests);
+    - `bases` int32 (B+1): cu_block_base derives only from (B, C) — both in
+      the cache key — so it is written once at build and never per step.
+
+    `owner` holds a weakref to the pool-layer view that produced the plan:
+    the view keeps the pool storage alive, so a dead weakref proves the pool
+    lifecycle ended and the entry is stale — even if a fresh pool later
+    reuses the same address (the caching allocator may hand a freed block
+    back immediately, which defeats address-only keys). The cache is keyed
+    on `id(view)` (identity), which the live weakref makes safe: a key hit
+    with a live owner is the same view object.
+
+    The derived row views and raw buffer addresses are frozen at build time:
+    the buffers are plan-owned and never reallocated, and skipping the
+    per-call `__getitem__`/`data_ptr()` round-trips is worth several us of
+    host time at decode-step call rates.
+    """
+    ptrs: torch.Tensor
+    bases: torch.Tensor
+    cu: torch.Tensor
+    lens: torch.Tensor
+    ids: torch.Tensor
+    base_t: torch.Tensor
+    bb_t: torch.Tensor
+    lens0: torch.Tensor
+    lens1: torch.Tensor
+    cu_out: torch.Tensor
+    cu_q_addr: int
+    cu_k_addr: int
+    ptrs_addr: int
+    bases_addr: int
+    owner: 'weakref.ref'
+
+
+_TM_WRITE_PLANS: dict = {}
+
+
+def reset_tm_write_cache() -> None:
+    """Drop all resident write plans (test isolation only)."""
+    _TM_WRITE_PLANS.clear()
+
+
+def _tm_write_plan(k_cache: torch.Tensor, num_seqs: int, num_cols: int) -> _TmWritePlan:
+    """Return the resident write plan for this pool-layer view and geometry,
+    rebuilding it when absent or stale.
+
+    The pool layer view (`k_cache`, a strided view holding the pool storage)
+    is allocated once per cache allocation by the engine and referenced for
+    the pool's whole lifetime, so a live weakref means the plan is fresh.
+    Plans are not inserted while capturing: buffers built inside a capture
+    live in the graph-private pool and must not be shared with later steps.
+    """
+    key = (id(k_cache), num_seqs, num_cols)
+    plan = _TM_WRITE_PLANS.get(key)
+    if plan is not None and plan.owner() is None:
+        del _TM_WRITE_PLANS[key]
+        plan = None
+    if plan is not None:
+        return plan
+
+    device = k_cache.device
+    cu = torch.zeros((2, num_seqs + 1), dtype=torch.int32, device=device)
+    lens = torch.empty((2, num_seqs), dtype=torch.int32, device=device)
+    ptrs = torch.empty(num_seqs * num_cols, dtype=torch.int64, device=device)
+    bases = torch.arange(num_seqs + 1, dtype=torch.int32, device=device) * num_cols
+    plan = _TmWritePlan(
+        ptrs=ptrs,
+        bases=bases,
+        cu=cu,
+        lens=lens,
+        ids=torch.empty(num_seqs * num_cols, dtype=torch.int64, device=device),
+        base_t=torch.tensor(k_cache.data_ptr(), dtype=torch.int64, device=device),
+        bb_t=torch.tensor(k_cache.stride(0), dtype=torch.int64, device=device),
+        lens0=lens[0],
+        lens1=lens[1],
+        cu_out=cu[:, 1:],
+        cu_q_addr=cu[0].data_ptr(),
+        cu_k_addr=cu[1].data_ptr(),
+        ptrs_addr=ptrs.data_ptr(),
+        bases_addr=bases.data_ptr(),
+        owner=weakref.ref(k_cache),
+    )
+    if not torch.cuda.is_current_stream_capturing():
+        _TM_WRITE_PLANS[key] = plan
+        # Dead entries have no other cleanup hook (the pool just frees); the
+        # rebuild path sweeps them so the dict tracks live pools only. Hits
+        # never sweep — the hot path stays free of scans.
+        for k in [k for k, v in _TM_WRITE_PLANS.items() if v.owner() is None]:
+            del _TM_WRITE_PLANS[k]
+    return plan
+
+
 def tm_process_kv_fill(key: torch.Tensor,
                        value: torch.Tensor,
                        k_cache: torch.Tensor,
@@ -380,46 +498,68 @@ def tm_process_kv_fill(key: torch.Tensor,
         block_offsets: Physical block ids per sequence, (B, max_blocks).
         max_q_len: Grid bound over per-sequence new-token counts; must be at
             least the true maximum (the kernel masks against cu_q_len).
+
+    Host-side cost: per-pool resident buffers (cumulative-length arrays,
+    pointer table) live in `_tm_write_plan`'s cache; each call rewrites their
+    content with three device-side dispatches (two pinned copies, one fused
+    cumulative-length scan, one `addcmul` pointer regeneration) and
+    allocates nothing. The historical per-call construction (~150us/step,
+    B3-07) is gone; the residual `from_dlpack` wraps of `key`/`value` stay
+    because those tensors are new every step.
     """
     from lmdeploy.turbomind import _tm
 
     block_len, num_kv_heads, head_dim = k_cache.shape[-3:]
-    device = key.device
     if key.dtype not in (torch.bfloat16, torch.float16):
         raise ValueError(f'tm_process_kv_fill requires bf16/fp16 keys, got {key.dtype}')
     if key.stride(2) != 1 or value.stride(2) != 1:
         raise ValueError('tm_process_kv_fill requires contiguous head dim')
 
-    # Cumulative lengths stay int32 end to end: torch.cumsum promotes int32
-    # input to int64 unless the dtype is pinned, and the binding reads
-    # `const int*` — an int64 array interleaves garbage and writes out of
-    # bounds (B3-07 root cause of the historical q_len=1 illegal access).
-    num_seqs = q_seqlens.shape[0]
-    cu_q = torch.zeros(num_seqs + 1, dtype=torch.int32, device=device)
-    cu_k = torch.zeros(num_seqs + 1, dtype=torch.int32, device=device)
-    cu_q[1:] = torch.cumsum(q_seqlens.to(device, torch.int32), 0, dtype=torch.int32)
-    cu_k[1:] = torch.cumsum(kv_seqlens.to(device, torch.int32), 0, dtype=torch.int32)
+    num_seqs, num_cols = block_offsets.shape
+    plan = _tm_write_plan(k_cache, num_seqs, num_cols)
 
-    ptrs, cu_block_base = tm_block_pointer_table(block_offsets, k_cache.data_ptr(), k_cache.stride(0))
+    # Per-step content rewrite on device, no allocation. Cumulative lengths
+    # stay int32 end to end: the staging rows pin the metadata's int64 widths
+    # and the fused scan inherits the int32 out dtype, so the binding's
+    # `const int*` contract cannot break through int64 promotion (the B3-07
+    # root cause of the historical q_len=1 illegal access). Row 0 of `cu`
+    # is cu_q_len, row 1 is cu_k_len; column 0 stays 0 from the build-time
+    # zeroing — only columns [1:] are rewritten.
+    plan.lens0.copy_(q_seqlens)
+    plan.lens1.copy_(kv_seqlens)
+    torch.cumsum(plan.lens, dim=1, out=plan.cu_out)
+    # Pointer table = base + block_id * block_bytes from the live block ids.
+    # The ids must be staged as int64 first: a strong int32 ids operand plus
+    # the weak 0-d int64 scalars would promote the whole `addcmul` to int32
+    # and truncate 64-bit pool addresses (the mirror image of the B3-07
+    # int64 cu defect). `addcmul` fuses scaling and pool-base offset into
+    # one dispatch; a copy + mul_ + add_ chain would cost three.
+    plan.ids.copy_(block_offsets.reshape(-1))
+    torch.addcmul(plan.base_t, plan.ids, plan.bb_t, out=plan.ptrs)
+
     stride_s = key.stride(0) // head_dim
     stride_h = key.stride(1) // head_dim
+    # Positional tail mirrors the binding signature: stride_c, stride_s,
+    # stride_h, max_q_len, num_kv_heads, head_dim, batch_size, block_len,
+    # kv_quant, stream_ptr (kwargs parsing costs ~1.3us per call, and the
+    # plan-frozen buffer addresses skip four data_ptr round-trips).
     _tm.tm_process_kv(
         _tm.from_dlpack(key),
         _tm.from_dlpack(value),
-        ptrs.data_ptr(),
-        cu_q.data_ptr(),
-        cu_k.data_ptr(),
-        cu_block_base.data_ptr(),
-        stride_c=stride_s,
-        stride_s=stride_s,
-        stride_h=stride_h,
-        max_q_len=max_q_len,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        batch_size=num_seqs,
-        block_len=block_len,
-        kv_quant=8,
-        stream_ptr=torch.cuda.current_stream(device).cuda_stream,
+        plan.ptrs_addr,
+        plan.cu_q_addr,
+        plan.cu_k_addr,
+        plan.bases_addr,
+        stride_s,
+        stride_s,
+        stride_h,
+        max_q_len,
+        num_kv_heads,
+        head_dim,
+        num_seqs,
+        block_len,
+        8,
+        torch._C._cuda_getCurrentRawStream(k_cache.device.index),
     )
 
 

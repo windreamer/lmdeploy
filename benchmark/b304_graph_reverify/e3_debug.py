@@ -49,7 +49,8 @@ def main():
         C_.record('e3d', probe=name, max_abs=round(C_.metrics(a, b)[0], 8),
                   bitwise=bool(torch.equal(a, b)))
 
-    graph.replay(); torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
     O1 = bufs['out'].view(C_.BATCH, C_.NUM_HEADS, C_.HEAD_DIM).clone()
     ref0 = dequant_ref(q0)
     C_.gate('e3d', O1, ref0, 'D0/replay-vs-dequant-ref')
@@ -60,7 +61,8 @@ def main():
     q1, _, _ = C_.make_qkv(seed=99, klen=1)
     bufs['q'].copy_(C_.q2d(q1))
     torch.cuda.synchronize()
-    graph.replay(); torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
     O2 = bufs['out'].view(C_.BATCH, C_.NUM_HEADS, C_.HEAD_DIM).clone()
     cmp('D1/O2-vs-O1', O2, O1)
     C_.gate('e3d', O2, dequant_ref(q1), 'D1/replay-vs-dequant-ref(new q)')
@@ -72,7 +74,8 @@ def main():
     bufs['k'].copy_(C_.rows2d(k2[:, 255]))
     bufs['v'].copy_(C_.rows2d(v2[:, 255]))
     torch.cuda.synchronize()
-    graph.replay(); torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
     O3 = bufs['out'].view(C_.BATCH, C_.NUM_HEADS, C_.HEAD_DIM).clone()
     cmp('D2/O3-vs-O2', O3, O2)
     E3.POOL_TENSOR[0]  # keep alive
@@ -87,7 +90,8 @@ def main():
     # D3: zero out, replay (does the kernel node write at all?)
     bufs['out'].zero_()
     torch.cuda.synchronize()
-    graph.replay(); torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
     O4 = bufs['out'].view(C_.BATCH, C_.NUM_HEADS, C_.HEAD_DIM).clone()
     nz = int((O4 != 0).sum().item())
     C_.record('e3d', probe='D3/out-nonzero-after-replay', nonzero=nz)
@@ -96,7 +100,8 @@ def main():
     # D5: pure host-side perturbation: run the eager binding dispatch (no
     # device-visible state change beyond idempotent re-store) then replay
     E3.eager_same_args(bufs, k_cache, C_.KLEN)
-    graph.replay(); torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
     O5 = bufs['out'].view(C_.BATCH, C_.NUM_HEADS, C_.HEAD_DIM).clone()
     cmp('D5/O5-vs-O4', O5, O4)
 
@@ -104,9 +109,12 @@ def main():
     # replayed against the same buffers -> does its replay read its own
     # stack values (i*192)?
     graph2, bufs2 = E3.build_capture(pool, k_cache, 192)
-    bufs2['q'].copy_(bufs['q']); bufs2['k'].copy_(bufs['k']); bufs2['v'].copy_(bufs['v'])
+    bufs2['q'].copy_(bufs['q'])
+    bufs2['k'].copy_(bufs['k'])
+    bufs2['v'].copy_(bufs['v'])
     torch.cuda.synchronize()
-    graph2.replay(); torch.cuda.synchronize()
+    graph2.replay()
+    torch.cuda.synchronize()
     O6 = bufs2['out'].view(C_.BATCH, C_.NUM_HEADS, C_.HEAD_DIM).clone()
     # true-length is 256; a 192-window consumer attends 192 keys
     kd, vd = C_.dequant_pool(E3.POOL_TENSOR)

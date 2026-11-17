@@ -11,6 +11,11 @@ extend-exclude = [
   "third_party",
   "src/turbomind",
   "benchmark/b304_debug",
+  "benchmark/b301_reverify",
+  "benchmark/b304_reverify",
+  "benchmark/b304_reverify_h6",
+  "benchmark/b304_graph_reverify",
+  "lmdeploy/serve/parsers",
 ]
 
 [tool.ruff.lint]

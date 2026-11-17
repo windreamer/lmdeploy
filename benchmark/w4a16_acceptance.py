@@ -1217,7 +1217,8 @@ def run_tp2_suite(out_dir: str | None):
     out_path.mkdir(parents=True, exist_ok=True)
     (out_path / 'report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
     md = ['# TP=2 readiness (ticket B3-06)', '',
-          f"- generated_at: {report['generated_at']}, device_count={gpu_count}, commit {report['environment']['commit']}",
+          f"- generated_at: {report['generated_at']}, "
+          f"device_count={gpu_count}, commit {report['environment']['commit']}",
           '', f"- {report['declaration']['statement']}", '',
           f"- tp=2 rungs in the h200 matrix: {len(tp2)}; on this host skipped: {len(tp2_skipped)} (reason:"
           f' `{tp2_skipped[0]["skip"] if tp2_skipped else "n/a"}`).', '',

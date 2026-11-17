@@ -304,7 +304,6 @@ class TmGatedDeltaRuleImpl(CudaGatedDeltaRuleImpl):
             torch.float16: 'f16',
         }[recurrent_state.dtype]
         entry = self._tm_entry(batch, hq, hv, head_dim, query.dtype, state_dtype, recurrent_state.device)
-        bufs = entry['bufs']
         _gdn_pack(entry, q[0], k[0], value[0], g[0], beta[0], recurrent_state, ids.input_state_ids,
                   ids.output_state_ids[:, 0], batch, normalize)
         from lmdeploy.turbomind import _tm
