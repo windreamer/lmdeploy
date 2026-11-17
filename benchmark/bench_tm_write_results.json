@@ -137,45 +137,45 @@
   "perf": [
     {
       "shape": "prefill_T128",
-      "tm_ms": 0.0308,
-      "pt_ms": 0.1269,
-      "tm_gbps": 51.0,
+      "tm_ms": 0.0317,
+      "pt_ms": 0.127,
+      "tm_gbps": 49.5,
       "pt_gbps": 12.4
     },
     {
       "shape": "prefill_T512",
       "tm_ms": 0.0389,
-      "pt_ms": 0.1249,
+      "pt_ms": 0.1485,
       "tm_gbps": 161.7,
-      "pt_gbps": 50.4
+      "pt_gbps": 42.4
     },
     {
       "shape": "prefill_T2048",
-      "tm_ms": 0.0829,
-      "pt_ms": 0.1709,
-      "tm_gbps": 303.4,
-      "pt_gbps": 147.3
+      "tm_ms": 0.0838,
+      "pt_ms": 0.1699,
+      "tm_gbps": 300.2,
+      "pt_gbps": 148.1
     },
     {
       "shape": "decode_m1_kv192",
-      "tm_ms": 0.0522,
-      "pt_ms": 0.1464,
+      "tm_ms": 0.0512,
+      "pt_ms": 0.1454,
       "tm_gbps": 0.2,
       "pt_gbps": 0.1
     },
     {
       "shape": "decode_m8_kv448",
-      "tm_ms": 0.0246,
-      "pt_ms": 0.1456,
-      "tm_gbps": 4.0,
+      "tm_ms": 0.0236,
+      "pt_ms": 0.1454,
+      "tm_gbps": 4.2,
       "pt_gbps": 0.7
     },
     {
       "shape": "decode_m32_kv704",
-      "tm_ms": 0.0256,
-      "pt_ms": 0.1463,
-      "tm_gbps": 15.4,
-      "pt_gbps": 2.7
+      "tm_ms": 0.0248,
+      "pt_ms": 0.1505,
+      "tm_gbps": 15.9,
+      "pt_gbps": 2.6
     }
   ],
   "int64bug": [
@@ -209,6 +209,83 @@
       "status": "WRONG-CONTENT",
       "dequant_max_abs": 21925724160.0,
       "collateral_bytes": 0
+    }
+  ],
+  "host_overhead": [
+    {
+      "shape": "decode_b1",
+      "legacy_us": 147.14,
+      "cached_us": 52.71,
+      "alloc_delta_bytes": 0,
+      "zeros_legacy": 5.22,
+      "to_legacy": 5.52,
+      "cumsum_legacy": 14.7,
+      "table_legacy": 20.42,
+      "lens_copy": 10.2,
+      "fused_scan": 12.25,
+      "ids_copy": 4.94,
+      "addcmul": 4.22,
+      "dlpack": 4.39
+    },
+    {
+      "shape": "decode_b4",
+      "legacy_us": 146.17,
+      "cached_us": 51.87,
+      "alloc_delta_bytes": 0,
+      "zeros_legacy": 5.22,
+      "to_legacy": 5.49,
+      "cumsum_legacy": 15.05,
+      "table_legacy": 20.53,
+      "lens_copy": 10.12,
+      "fused_scan": 12.04,
+      "ids_copy": 4.95,
+      "addcmul": 4.06,
+      "dlpack": 4.34
+    },
+    {
+      "shape": "prefill_b4_t192",
+      "legacy_us": 146.67,
+      "cached_us": 53.0,
+      "alloc_delta_bytes": 0,
+      "zeros_legacy": 5.1,
+      "to_legacy": 5.47,
+      "cumsum_legacy": 15.05,
+      "table_legacy": 20.48,
+      "lens_copy": 10.0,
+      "fused_scan": 11.96,
+      "ids_copy": 4.85,
+      "addcmul": 4.05,
+      "dlpack": 4.31
+    }
+  ],
+  "perf_fillpath": [
+    {
+      "shape": "decode_b1",
+      "tm_ms": 0.0707,
+      "pt_ms": 0.126,
+      "tm_vs_pt": 0.56,
+      "gate": "FAIL (decode b1 <= 0.02ms)"
+    },
+    {
+      "shape": "decode_b4",
+      "tm_ms": 0.0727,
+      "pt_ms": 0.1476,
+      "tm_vs_pt": 0.49,
+      "gate": "-"
+    },
+    {
+      "shape": "decode_b4_m8",
+      "tm_ms": 0.0727,
+      "pt_ms": 0.1494,
+      "tm_vs_pt": 0.49,
+      "gate": "-"
+    },
+    {
+      "shape": "prefill_b4_t192",
+      "tm_ms": 0.0727,
+      "pt_ms": 0.128,
+      "tm_vs_pt": 0.57,
+      "gate": "-"
     }
   ]
 }
