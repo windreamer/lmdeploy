@@ -47,10 +47,11 @@ Copyright (c) OpenMMLab. All rights reserved.
 
 ## 六、提交流程
 
-1. 按第三节与第四节核对本次改动是否引入新问题（构建、注释）。
-2. 运行机械自检（`WRITING_STYLE.md` 第七节）。
-3. `ninja -C build` 通过，且第三节第 4 条冒烟验证通过。
-4. 提交信息格式：`类型(范围): 摘要`，与上游近期提交一致（示例：`fix(api): ...`、`feat(ascend): ...`）。正文列出改动、验证与结果。
+1. 涉及 CUDA kernel / triton kernel / 显存读写路径的改动:对**新增或修改的路径**运行 `compute-sanitizer`——memcheck 必跑,双写入方场景加 racecheck,分配初始化相关加 initcheck。限定在改动路径的小形状用例(sanitizer 慢,不跑全量),命令形如 `compute-sanitizer --tool memcheck .venv/bin/python -m pytest <相关测试>`。
+2. 按第三节与第四节核对本次改动是否引入新问题(构建、注释)。
+3. 运行机械自检(`WRITING_STYLE.md` 第七节)。
+4. `ninja -C build` 通过,且第三节第 4 条冒烟验证通过。
+5. 提交信息格式:`类型(范围): 摘要`,与上游近期提交一致(示例:`fix(api): ...`、`feat(ascend): ...`)。正文列出改动、验证与结果。
 
 ## 七、文档体系
 
