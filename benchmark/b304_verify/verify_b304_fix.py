@@ -41,8 +41,12 @@ q = (torch.randn(B, HQ, D, generator=gen) * 0.5).cuda().bfloat16()
 k = (torch.randn(NB, S, H, D, generator=gen) * 0.5).cuda().bfloat16()
 v = (torch.randn(NB, S, H, D, generator=gen) * 0.5).cuda().bfloat16()
 
-blk = lambda b, p: b * BPS + p // S
-off = lambda p: p % S
+def blk(b, p):
+    return b * BPS + p // S
+
+
+def off(p):
+    return p % S
 
 
 def quant_kv(kv):
