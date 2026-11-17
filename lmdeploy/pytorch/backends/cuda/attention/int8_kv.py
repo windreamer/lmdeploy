@@ -136,7 +136,8 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         """DLPack-wrap a torch tensor for the TurboMind bindings."""
         return self._tm.from_dlpack(tensor)
 
-    def _graph_state(self, num_seqs: int, num_heads: int, num_kv_heads: int, head_dim: int, device: torch.device):
+    def _graph_state(self, num_seqs: int, num_heads: int, num_kv_heads: int, head_dim: int, device: torch.device,
+                     elem_size: int):
         """Persistent buffers for the graph-captured TM decode binding.
 
         The binding contract (`tm_attn_decode_graph`) requires every plan
@@ -152,22 +153,33 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
           allocation/free nodes (defect ② fixed).
 
         Buffers are keyed by capture shape so different graphs (batch
-        sizes) own disjoint persistent state.
+        sizes) own disjoint persistent state; an existing entry is never
+        replaced (a captured graph would keep reading buffers we freed).
+        `reset_tm_graph_state` releases every entry when the graph
+        lifecycle ends.
         """
         key = (num_seqs, num_heads, num_kv_heads, head_dim, device)
-        state = getattr(self, '_tm_graph_state', None)
-        if state is not None and state['key'] == key:
+        states = getattr(self, '_tm_graph_states', None)
+        if states is None:
+            states = {}
+            self._tm_graph_states = states
+        state = states.get(key)
+        if state is not None:
             return state
-        ws_bytes = self._tm.tm_decode_workspace_bytes(num_seqs, num_heads, num_kv_heads, head_dim,
-                                                      query.element_size())
+        ws_bytes = self._tm.tm_decode_workspace_bytes(num_seqs, num_heads, num_kv_heads, head_dim, elem_size)
         state = {
-            'key': key,
             'cu_q_len': torch.zeros(num_seqs + 1, dtype=torch.int32, device=device),
             'cu_k_len': torch.zeros(num_seqs + 1, dtype=torch.int32, device=device),
             'workspace': torch.zeros(ws_bytes, dtype=torch.uint8, device=device),
         }
-        self._tm_graph_state = state
+        states[key] = state
         return state
+
+    def reset_tm_graph_state(self):
+        """Release all persistent graph-capture buffers (paired with the
+        graph lifecycle: call when every captured graph of this impl has
+        been dropped)."""
+        self._tm_graph_states = {}
 
     def _forward_tm_decode_graph(
         self,
@@ -186,7 +198,7 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         pool_base, block_bytes, block_len, num_kv_heads, head_dim = self._pool_geometry(k_cache)
         num_seqs = attn_metadata.kv_seqlens.shape[0]
         num_heads = query.shape[-2]
-        gs = self._graph_state(num_seqs, num_heads, num_kv_heads, head_dim, query.device)
+        gs = self._graph_state(num_seqs, num_heads, num_kv_heads, head_dim, query.device, query.element_size())
 
         q = query.reshape(num_seqs, -1).contiguous()
         out = torch.empty((num_seqs, num_heads * head_dim), dtype=query.dtype, device=query.device)
@@ -266,6 +278,14 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         rows = attn_metadata.q_start_loc.to(torch.long)
         k_rows = key.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
         v_rows = value.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
+        # Real per-sequence cumulative lengths on device: without them the
+        # binding bakes constant lengths from max_k_len (padded capacity),
+        # pushing padded keys into softmax and re-storing rows at
+        # ti = max_k_len - 1 beyond the true last slot (pool-tail pollution).
+        cu_q_len = torch.zeros(num_seqs + 1, dtype=torch.int32, device=query.device)
+        cu_k_len = torch.zeros(num_seqs + 1, dtype=torch.int32, device=query.device)
+        cu_q_len[1:].copy_(torch.cumsum(attn_metadata.q_seqlens.to(torch.int32), 0))
+        cu_k_len[1:].copy_(torch.cumsum(attn_metadata.kv_seqlens.to(torch.int32), 0))
         tm.tm_attn_decode(
             self._wrap(q),
             self._wrap(k_rows),
@@ -273,6 +293,8 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
             self._wrap(out),
             ptrs.data_ptr(),
             cu_block_base.data_ptr(),
+            cu_q_len.data_ptr(),
+            cu_k_len.data_ptr(),
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,

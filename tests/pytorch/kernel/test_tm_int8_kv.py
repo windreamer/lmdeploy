@@ -112,7 +112,7 @@ def _assert_gate(out, ref, label):
     return max_abs, kl, argmatch
 
 
-def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0):
+def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0, batch=BATCH):
     """One TM write-kernel append of new tokens (token-major slices)."""
     from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
     from lmdeploy.turbomind import _tm
@@ -122,8 +122,8 @@ def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0):
         k_cache.data_ptr(), k_cache.stride(0), k_cache.shape[1], k_cache.shape[2], k_cache.shape[3])
     ptrs, cu_block_base = tm_block_pointer_table(_block_offsets(), pool_base, block_bytes)
     num_tokens = k_slice.shape[0]
-    q_len = num_tokens // BATCH
-    cu_q = _cu([q_len] * BATCH)
+    q_len = num_tokens // batch
+    cu_q = _cu([q_len] * batch)
     cu_k = _cu(kv_seqlens)
     _tm.tm_process_kv(
         _tm.from_dlpack(k_slice.contiguous()),
@@ -131,7 +131,7 @@ def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0):
         ptrs.data_ptr(), cu_q.data_ptr(), cu_k.data_ptr(), cu_block_base.data_ptr(),
         stride_c=num_kv_heads, stride_s=num_kv_heads, stride_h=1,
         max_q_len=q_len, num_kv_heads=num_kv_heads, head_dim=head_dim,
-        batch_size=BATCH, block_len=BLOCK_LEN, kv_quant=8,
+        batch_size=batch, block_len=BLOCK_LEN, kv_quant=8,
         stream_ptr=torch.cuda.current_stream().cuda_stream)
 
 
@@ -779,3 +779,241 @@ def test_graph_capture_guard_routes_tm():
     torch.cuda.synchronize()  # ensure no capture is active
     meta = SimpleNamespace(max_q_seqlen=1)
     assert impl._can_tm_decode(meta), 'capture must take TM when buffers can be prepared'
+
+
+# ---------------------------------------------------------------------------
+# E1 / W2 regressions (graph audit §2/§4, TM graft scope)
+# ---------------------------------------------------------------------------
+
+
+def _per_seq_reference(q, k, v, lens):
+    """Reference with per-sequence true lengths (padded capacity elsewhere)."""
+    outs = []
+    for b, ln in enumerate(lens):
+        outs.append(_reference(q[b:b + 1], k[b:b + 1], v[b:b + 1], ln))
+    return torch.cat(outs, 0)
+
+
+def test_eager_decode_unequal_lengths_and_pool_tail():
+    """E1: eager `tm_attn_decode` with device cu_q_len/cu_k_len handles an
+    unequal-length batch under a padded max_k_len: output matches the
+    per-sequence reference and no pool slot beyond each sequence's true
+    length is written (no 8384B tail pollution)."""
+    from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
+    from lmdeploy.turbomind import _tm
+
+    lens = [193, 208, 192, 225]
+    _, k, v = _make_data()
+    q, _, _ = _make_data(seed=13)
+    pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    pool_t = pool.pools[0].tensor
+    _bridge_fill(k[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 v[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 lens, pool)
+    torch.cuda.synchronize()
+
+    k_cache = _layer_views(pool, 0)[0]
+    ptrs, bases = tm_block_pointer_table(_block_offsets(), k_cache.data_ptr(), k_cache.stride(0))
+    cu_q = _cu([1] * BATCH).int()
+    cu_k = _cu(lens).int()
+    tail_snapshot = pool_t.clone()
+
+    k_last = k[torch.arange(BATCH), torch.tensor(lens) - 1]
+    v_last = v[torch.arange(BATCH), torch.tensor(lens) - 1]
+    out = torch.empty(BATCH, NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+    _tm.tm_attn_decode(
+        _tm.from_dlpack(q.reshape(BATCH, -1).contiguous()),
+        _tm.from_dlpack(k_last.reshape(BATCH, -1).contiguous()),
+        _tm.from_dlpack(v_last.reshape(BATCH, -1).contiguous()),
+        _tm.from_dlpack(out),
+        ptrs.data_ptr(), bases.data_ptr(),
+        cu_q.data_ptr(), cu_k.data_ptr(),
+        num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
+        batch_size=BATCH, block_len=BLOCK_LEN, max_k_len=KLEN,  # padded capacity
+        kv_quant=8, stream_ptr=torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+
+    out = out.view(BATCH, NUM_HEADS, HEAD_DIM)
+    _assert_gate(out, _per_seq_reference(q, k, v, lens), 'eager-unequal/padded-capacity')
+
+    # Pool tail: each sequence writes only at ti = len - 1; everything past
+    # that stays byte-identical. Mask out every sequence's own last slot.
+    pool_b = pool_t[0] if pool_t.dim() == 3 else pool_t
+    snap_b = tail_snapshot[0] if tail_snapshot.dim() == 3 else tail_snapshot
+    bo = _block_offsets()
+    for b, ln in enumerate(lens):
+        ti_blk = (ln - 1) // BLOCK_LEN
+        ti_off = (ln - 1) % BLOCK_LEN
+        for j, blk in enumerate(bo[b].tolist()):
+            if j != ti_blk:
+                assert torch.equal(pool_b[blk], snap_b[blk]), \
+                    f'seq {b}: untouched block {j} changed (pool-tail pollution)'
+            else:
+                keep = torch.arange(BLOCK_LEN) != ti_off
+                pb, sb = pool_b[blk], snap_b[blk]
+                codes = 2 * NUM_KV_HEADS * BLOCK_LEN * HEAD_DIM
+                assert torch.equal(pb[:codes].view(NUM_KV_HEADS, 2, BLOCK_LEN, HEAD_DIM)[:, :, keep],
+                                   sb[:codes].view(NUM_KV_HEADS, 2, BLOCK_LEN, HEAD_DIM)[:, :, keep]) \
+                    and torch.equal(pb[codes:].view(torch.bfloat16).view(NUM_KV_HEADS, 2, BLOCK_LEN, 2)[:, :, keep],
+                                    sb[codes:].view(torch.bfloat16).view(NUM_KV_HEADS, 2, BLOCK_LEN, 2)[:, :, keep]), \
+                    f'seq {b}: block {j}: slots beyond ti = {ln - 1} were polluted'
+    assert (pool_b != snap_b).any().item(), 're-store of the own last slot must be live'
+
+
+def test_eager_tm_decode_impl_path_unequal_lengths():
+    """E1 at the impl level: `TmInt8KVAttentionImpl._forward_tm_decode`
+    (eager, non-capturing) passes device cumulative lengths, so a padded
+    `max_kv_seqlen` metadata stays correct on an unequal-length batch."""
+    from lmdeploy.pytorch.backends.cuda.attention.int8_kv import TmInt8KVAttentionImpl
+
+    lens = [193, 208, 192, 225]
+    _, k, v = _make_data()
+    q, _, _ = _make_data(seed=17)
+    pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    _bridge_fill(k[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 v[:, :max(lens)].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 lens, pool)
+    torch.cuda.synchronize()
+
+    impl = TmInt8KVAttentionImpl(NUM_HEADS, HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
+    if impl._tm_module() is None:
+        pytest.skip('native TM module unavailable')
+    impl._tm_last_new_kv = (k[:, max(lens) - 1], v[:, max(lens) - 1])
+
+    device = torch.device('cuda')
+    meta = SimpleNamespace(
+        quant_policy=QuantPolicy.INT8,
+        kv_seqlens=torch.tensor(lens, dtype=torch.long, device=device),
+        q_seqlens=torch.ones(BATCH, dtype=torch.long, device=device),
+        q_start_loc=torch.arange(BATCH, dtype=torch.long, device=device),
+        block_offsets=_block_offsets(),
+        max_kv_seqlen=KLEN,  # padded
+    )
+    k_cache, v_cache = _layer_views(pool, 0)[:2]
+    out = impl._forward_tm_decode(q, k_cache, v_cache, meta)
+    _assert_gate(out, _per_seq_reference(q, k, v, lens), 'impl-eager-unequal/padded-capacity')
+
+
+def test_graph_state_two_shapes_and_reset():
+    """W2: `_graph_state` is a per-shape dict — two different decode graphs
+    captured sequentially on one impl instance keep disjoint persistent
+    state and both replay correctly (bitwise vs their eager controls); an
+    existing entry is never replaced; `reset_tm_graph_state` releases all.
+
+    Capture always happens with equal per-sequence lengths; unequal lengths
+    are exercised on replay via the device `cu_k_len` buffers (the graph
+    entry's masking contract)."""
+    from lmdeploy.pytorch.backends.cuda.attention.int8_kv import TmInt8KVAttentionImpl
+    from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
+    from lmdeploy.turbomind import _tm
+
+    impl = TmInt8KVAttentionImpl(NUM_HEADS, HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
+    if impl._tm_module() is None:
+        pytest.skip('native TM module unavailable')
+    device = torch.device('cuda')
+
+    _, k, v = _make_data()
+    q4, _, _ = _make_data(seed=23)
+    pool4 = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    _bridge_fill(k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 [PREFILL_LEN] * BATCH, pool4)
+    k2, v2, q2 = k[:2], v[:2], q4[:2]
+    pool2 = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    _bridge_fill(k2[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 v2[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 [PREFILL_LEN] * 2, pool2, batch=2)
+    torch.cuda.synchronize()
+
+    def make_case(pool, batch, q, k_last, v_last):
+        """Graph case driven by the impl's `_graph_state` buffers (mirrors
+        `_GraphDecodeCase`, but state ownership lives in the impl dict)."""
+        k_cache = _layer_views(pool, 0)[0]
+        cols = _block_offsets().shape[1]
+        cu_block_nums = _cu([cols] * batch).int()
+        q_b = torch.zeros(batch, NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        k_b = torch.zeros(batch, NUM_KV_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        v_b = torch.zeros(batch, NUM_KV_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        out_b = torch.zeros(batch, NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        kv_buf = torch.zeros(batch, dtype=torch.int32, device='cuda')
+        ptrs, bases = tm_block_pointer_table(_block_offsets()[:batch], k_cache.data_ptr(), k_cache.stride(0))
+
+        def ops():
+            st = impl._graph_state(batch, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, device, 2)
+            cu_q, cu_k, ws = st['cu_q_len'], st['cu_k_len'], st['workspace']
+            cu_q[0].zero_()
+            cu_q[1:].copy_(torch.cumsum(torch.ones(batch, dtype=torch.int32, device='cuda'), 0))
+            cu_k[0].zero_()
+            cu_k[1:].copy_(torch.cumsum(kv_buf, 0))
+            _tm.tm_attn_decode_graph(
+                _tm.from_dlpack(q_b), _tm.from_dlpack(k_b), _tm.from_dlpack(v_b), _tm.from_dlpack(out_b),
+                ptrs.data_ptr(), cu_block_nums.data_ptr(), cu_q.data_ptr(), cu_k.data_ptr(), ws.data_ptr(),
+                num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
+                batch_size=batch, block_len=BLOCK_LEN, max_k_len=cols * BLOCK_LEN,
+                kv_quant=8, stream_ptr=torch.cuda.current_stream().cuda_stream)
+
+        def set_inputs(lens):
+            q_b.copy_(q.reshape(batch, -1))
+            k_b.copy_(k_last.reshape(batch, -1))
+            v_b.copy_(v_last.reshape(batch, -1))
+            kv_buf.copy_(torch.tensor(lens, dtype=torch.int32, device='cuda'))
+
+        set_inputs([PREFILL_LEN] * batch)  # equal lengths at capture
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                ops()
+        torch.cuda.current_stream().wait_stream(side)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            ops()
+
+        def replay(lens):
+            set_inputs(lens)
+            graph.replay()
+            torch.cuda.synchronize()
+            return out_b.view(batch, NUM_HEADS, HEAD_DIM).clone()
+
+        def eager(lens):
+            set_inputs(lens)
+            ops()
+            torch.cuda.synchronize()
+            return out_b.view(batch, NUM_HEADS, HEAD_DIM).clone()
+
+        return replay, eager
+
+    # Capture shape 1 (B=4), then shape 2 (B=2), on the SAME impl instance.
+    replay4, eager4 = make_case(pool4, BATCH, q4, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1])
+    replay2, eager2 = make_case(pool2, 2, q2, k2[:, PREFILL_LEN - 1], v2[:, PREFILL_LEN - 1])
+
+    lens4 = [193, 208, 192, 225]
+    lens2 = [200, 193]
+    # Interleaved replays: both graphs stay correct after both captures.
+    assert torch.equal(replay4([PREFILL_LEN] * BATCH), eager4([PREFILL_LEN] * BATCH)), \
+        'B4 replay not bitwise vs eager at capture lengths'
+    out4 = replay4(lens4)
+    assert torch.equal(out4, eager4(lens4)), 'B4 replay not bitwise vs eager (unequal lengths)'
+    out2 = replay2(lens2)
+    assert torch.equal(out2, eager2(lens2)), 'B2 replay not bitwise vs eager (unequal lengths)'
+    assert torch.equal(replay4(lens4), eager4(lens4)), 'B4 replay broken after B2 replays'
+    _assert_gate(out4, _per_seq_reference(q4, k, v, lens4), 'graph-b4/unequal')
+    _assert_gate(out2, _per_seq_reference(q2, k2, v2, lens2), 'graph-b2/unequal')
+
+    # Shape-keyed state: distinct entries, none replaced by the other.
+    states = impl._tm_graph_states
+    k4 = (BATCH, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, device)
+    k2s = (2, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, device)
+    assert k4 in states and k2s in states
+    s4, s2 = states[k4], states[k2s]
+    assert s4['cu_k_len'] is not s2['cu_k_len'] and s4['workspace'] is not s2['workspace']
+    assert s4['cu_k_len'].numel() == BATCH + 1 and s2['cu_k_len'].numel() == 3
+
+    # Re-requesting an existing shape must not replace its buffers (a live
+    # graph would keep reading freed state).
+    assert impl._graph_state(BATCH, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, device, 2) is s4
+
+    # Reset releases every entry.
+    impl.reset_tm_graph_state()
+    assert not impl._tm_graph_states

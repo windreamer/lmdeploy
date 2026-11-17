@@ -209,6 +209,10 @@ DecodePlan<T> BuildDecodePlan(const core::Tensor& q,
             qo[i] = i;
             ko[i] = i * max_k_len;
         }
+        // Per-call semantics: this eager entry is never captured; the stack
+        // H2D below is legal because the stack outlives the dispatch. The
+        // CUDA-graph-safe entry (`TmAttnDecodeGraph`/`DispatchDecodeGraph`)
+        // carries the capture contract with memsets instead.
         TM_CUDA_CHECK(cudaMemcpyAsync(plan.finished.raw_data(), f.data(), f.size(), cudaMemcpyHostToDevice, stream));
         // Decode always appends past the read-only prefix (production decode
         // sets `readonly_block_num = 0`); a valid zero buffer keeps that
@@ -629,6 +633,8 @@ void TmAttnDecode(const std::shared_ptr<core::Tensor>& q,
                   std::shared_ptr<core::Tensor>        out,
                   std::uintptr_t                       block_ptrs_addr,
                   std::uintptr_t                       cu_block_nums_addr,
+                  std::uintptr_t                       cu_q_len_addr,
+                  std::uintptr_t                       cu_k_len_addr,
                   int                                  num_heads,
                   int                                  num_kv_heads,
                   int                                  head_dim,
@@ -646,6 +652,11 @@ void TmAttnDecode(const std::shared_ptr<core::Tensor>& q,
     auto       stream        = (cudaStream_t)stream_addr;
     char**     block_ptrs    = (char**)block_ptrs_addr;
     const int* cu_block_nums = (const int*)cu_block_nums_addr;
+    // Optional caller-owned device cumulative lengths ([B+1] int32). Null
+    // falls back to the benchmark's constant per-sequence lengths (old
+    // behavior); non-null feeds real per-sequence lengths to the plan.
+    const int* cu_q_len = (const int*)cu_q_len_addr;
+    const int* cu_k_len = (const int*)cu_k_len_addr;
 
     int quant_policy = 0;
     if (kv_quant == 8) {
@@ -668,8 +679,8 @@ void TmAttnDecode(const std::shared_ptr<core::Tensor>& q,
                                                                     *out,
                                                                     block_ptrs,
                                                                     cu_block_nums,
-                                                                    nullptr,
-                                                                    nullptr,
+                                                                    cu_q_len,
+                                                                    cu_k_len,
                                                                     num_heads,
                                                                     num_kv_heads,
                                                                     head_dim,
@@ -687,8 +698,8 @@ void TmAttnDecode(const std::shared_ptr<core::Tensor>& q,
                                                       *out,
                                                       block_ptrs,
                                                       cu_block_nums,
-                                                      nullptr,
-                                                      nullptr,
+                                                      cu_q_len,
+                                                      cu_k_len,
                                                       num_heads,
                                                       num_kv_heads,
                                                       head_dim,
@@ -840,6 +851,8 @@ void bind_attn_bench(py::module_& m)
           "out"_a,
           "block_ptrs_addr"_a,
           "cu_block_nums_addr"_a,
+          "cu_q_len_addr"_a = std::uintptr_t{0},
+          "cu_k_len_addr"_a = std::uintptr_t{0},
           "num_heads"_a,
           "num_kv_heads"_a,
           "head_dim"_a,
@@ -851,7 +864,10 @@ void bind_attn_bench(py::module_& m)
           "Single-shot decode-attention dispatch into `out`. `k`/`v` "
           "[B, Hkv*D] must hold the real K/V rows of the newest token "
           "(ti = k_len - 1): the kernel re-stores them (rope'd, quantized) "
-          "into the pool, mirroring production decode.");
+          "into the pool, mirroring production decode. Optional "
+          "`cu_q_len_addr`/`cu_k_len_addr` are device int32[B+1] cumulative "
+          "per-sequence lengths; null (default) keeps the benchmark's "
+          "constant-length baking (equal-length batches only).");
 
     m.def("tm_decode_workspace_bytes",
           &TmDecodeWorkspaceBytes,
