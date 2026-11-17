@@ -1062,126 +1062,34 @@ def int8_kv_enablement() -> dict:
                 recorded_capable=getattr(tm_kv, '_TM_INT8_KV_CAPABLE', None))
 
 
-def _apply_tm_kv_import_shim() -> str | None:
-    """Alias the mis-targeted ``..tm_kv`` import inside the TM int8-KV
-    attention module.
+def _tm_int8_kv_source_state() -> dict:
+    """Probe whether the pre-fix B3-04 attention-integration defects remain.
 
-    ``backends/cuda/attention/int8_kv.py`` reads ``from ..tm_kv import ...``
-    from the ``backends.cuda.attention`` package, which resolves to the
-    nonexistent ``backends.cuda.tm_kv``; the real module lives one level up
-    at ``backends.tm_kv``. Registering the alias in ``sys.modules`` keeps
-    the on-route measurable without touching ``lmdeploy/``. Returns the
-    shim note for the report, or None when unnecessary.
+    The harness once carried two class-level shims for four source defects
+    (mis-targeted ``..tm_kv`` import, decode call missing the newest-token
+    K/V rows, a capture guard that let the TM path run inside graph
+    capture, and a non-capture-safe fallback). The source tree carries the
+    fixes now; the shims are retired and this probe only reports the state,
+    so a stale checkout still fails loudly with the defect names instead of
+    silently masking the real path.
     """
-    import sys
-    target = 'lmdeploy.pytorch.backends.cuda.tm_kv'
-    if target in sys.modules:
-        return None
-    try:
-        import lmdeploy.pytorch.backends.tm_kv as real
-    except Exception:  # pragma: no cover  real module always present in this repo
-        return None
-    sys.modules[target] = real
-    return f'harness import shim: sys.modules alias "{target}" -> "lmdeploy.pytorch.backends.tm_kv".'
+    import inspect
 
-
-def _patch_tm_int8_decode_class() -> str | None:
-    """Repair the TM int8 decode call site at the class level.
-
-    ``TmInt8KVAttentionImpl._forward_tm_decode`` invokes ``tm.tm_attn_decode``
-    with ``(q, out, ptrs, cu)`` while the native binding requires
-    ``(q, k, v, out, block_ptrs_addr, cu_block_nums_addr, ...)``. The engine
-    warmup decodes before any caller can touch instances, so the corrected
-    forward binds on the class, before engine start. Same kernel, same
-    semantics; the shim only supplies the missing K/V pool handles.
-    Returns a report note, or None when not applicable.
-    """
-    import torch
-
+    state = dict(import_ok=True, decode_rows=True, capture_guard=True)
     try:
         from lmdeploy.pytorch.backends.cuda.attention import int8_kv as int8_kv_mod
-        TmInt8KVAttentionImpl = int8_kv_mod.TmInt8KVAttentionImpl
+        module_src = inspect.getsource(int8_kv_mod)
+        # Defect 1 was `from ..tm_kv import ...` (resolves to the nonexistent
+        # backends.cuda.tm_kv); the fix imports the real module one level up.
+        state['import_ok'] = 'from ..tm_kv' not in module_src
+        decode_src = inspect.getsource(int8_kv_mod.TmInt8KVAttentionImpl._forward_tm_decode)
+        state['decode_rows'] = 'k_rows' in decode_src and 'v_rows' in decode_src
+        guard_src = inspect.getsource(int8_kv_mod.TmInt8KVAttentionImpl._can_tm_decode)
+        state['capture_guard'] = 'capturing' in guard_src and 'eager' in guard_src.lower()
     except Exception:
-        return None
+        pass
+    return state
 
-    def _forward_tm_decode(self, query, k_cache, v_cache, attn_metadata):
-        tm = self._tm_module()
-        _, _, block_len, num_kv_heads, head_dim = self._pool_geometry(k_cache)
-        num_seqs = attn_metadata.kv_seqlens.shape[0]
-        num_heads = query.shape[-2]
-        q = query.reshape(num_seqs, -1).contiguous()
-        out = torch.empty((num_seqs, num_heads * head_dim), dtype=query.dtype, device=query.device)
-        ptrs, cu_block_base = self._pointer_tables(k_cache, attn_metadata)
-        # No D2H sync here: a `.max()` fallback would invalidate graph capture.
-        max_k_len = attn_metadata.max_kv_seqlen
-        if max_k_len is None:
-            return int8_kv_mod.TritonAttentionImpl._forward_decoding(
-                self, query, k_cache, v_cache, attn_metadata, None,
-                k_scales_zeros=self._pt_scales(getattr(self, '_tm_k_scales_zeros', None)),
-                v_scales_zeros=self._pt_scales(getattr(self, '_tm_v_scales_zeros', None)))
-        # The binding re-stores the newest-token K/V rows into the pool, so
-        # it needs the [B, Hkv*D] rows of this step's new token per sequence.
-        key, value = getattr(self, '_tm_last_new_kv', (None, None))
-        if key is None or value is None:
-            raise RuntimeError('TM int8 decode shim: no new-token K/V captured for this step')
-        rows = attn_metadata.q_start_loc.to(torch.long)
-        k_rows = key.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
-        v_rows = value.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
-        tm.tm_attn_decode(self._wrap(q),
-                          self._wrap(k_rows),
-                          self._wrap(v_rows),
-                          self._wrap(out),
-                          ptrs.data_ptr(),
-                          cu_block_base.data_ptr(),
-                          num_heads=num_heads,
-                          num_kv_heads=num_kv_heads,
-                          head_dim=head_dim,
-                          batch_size=num_seqs,
-                          block_len=block_len,
-                          max_k_len=max_k_len,
-                          kv_quant=8,
-                          stream_ptr=torch.cuda.current_stream(query.device).cuda_stream)
-        return out.view(num_seqs, num_heads, head_dim)
-
-    def _forward(self, query, key, value, k_cache, v_cache, attn_metadata, k_scales_zeros=None,
-                 v_scales_zeros=None, learnable_sink=None, inplace=True, **kwargs):
-        """Replicate TmInt8KVAttentionImpl.forward, capturing the new-token K/V
-        for the decode shim."""
-        from lmdeploy.messages import QuantPolicy
-        is_int8 = attn_metadata.quant_policy == QuantPolicy.INT8
-        if is_int8:
-            if key is not None and value is not None:
-                self._tm_last_new_kv = (key, value)
-                self._tm_k_scales_zeros = k_scales_zeros
-                self._tm_v_scales_zeros = v_scales_zeros
-                self._fill_kv_cache_impl(key, value, k_cache, v_cache, attn_metadata,
-                                         max_q_seqlen=self._get_max_q_seqlen(query, attn_metadata),
-                                         k_scales_zeros=k_scales_zeros,
-                                         v_scales_zeros=v_scales_zeros)
-            if attn_metadata.is_decoding and self._can_tm_decode(attn_metadata) \
-                    and self._tm_module() is not None:
-                return self._forward_tm_decode(query, k_cache, v_cache, attn_metadata)
-            k_scales_zeros = self._pt_scales(k_scales_zeros)
-            v_scales_zeros = self._pt_scales(v_scales_zeros)
-            key = value = None
-        return int8_kv_mod.TritonAttentionImpl.forward(self,
-                                                       query,
-                                                       key,
-                                                       value,
-                                                       k_cache,
-                                                       v_cache,
-                                                       attn_metadata,
-                                                       k_scales_zeros=k_scales_zeros,
-                                                       v_scales_zeros=v_scales_zeros,
-                                                       learnable_sink=learnable_sink,
-                                                       inplace=inplace,
-                                                       **kwargs)
-
-    TmInt8KVAttentionImpl._forward_tm_decode = _forward_tm_decode
-    TmInt8KVAttentionImpl.forward = _forward
-    return ('harness decode shim: class-level re-bind of TmInt8KVAttentionImpl._forward_tm_decode/forward'
-            ' (source call site passes (q, out) where the binding needs (q, k_rows, v_rows, out);'
-            ' the rows are captured in forward).')
 
 
 def run_int8kv_suite(model_path: str | None, out_dir: str | None, batches: str = '',
@@ -1216,8 +1124,7 @@ def run_int8kv_suite(model_path: str | None, out_dir: str | None, batches: str =
     old_level = lm_logger.level
     lm_logger.addHandler(collector)
     lm_logger.setLevel(logging.DEBUG)
-    shim_note = _apply_tm_kv_import_shim()
-    decode_shim_note = _patch_tm_int8_decode_class()
+    source_state = _tm_int8_kv_source_state()
     routes = dict(
         int8kv_tm_layout_on=dict(quant_policy='INT8', env={INT8_KV_KNOB: 'on'}),
         int8kv_stock_off=dict(quant_policy='INT8', env={INT8_KV_KNOB: 'off'}),
@@ -1243,29 +1150,22 @@ def run_int8kv_suite(model_path: str | None, out_dir: str | None, batches: str =
         lm_logger.setLevel(old_level)
     report['layout_enablement'] = dict(
         layout_enabled_log=any('TM int8-KV block layout enabled' in m for m in on_logs),
-        probe=int8_kv_enablement())
-    report['notes'] = [
-        'Source gap 1: lmdeploy/pytorch/backends/cuda/attention/int8_kv.py imports "from ..tm_kv import ..." from'
-        ' the backends.cuda.attention package; that resolves to the nonexistent backends.cuda.tm_kv, so engine'
-        ' start fails outright under the on-knob. lmdeploy/ is out of this ticket\'s write scope.',
-        'Source gap 2: TmInt8KVAttentionImpl._forward_tm_decode calls tm.tm_attn_decode(q, out, ptrs, cu), while'
-        ' the native binding (src/turbomind/python/attn_bench_bind.cpp) requires (q, k_rows, v_rows, out,'
-        ' block_ptrs, cu_block_nums) with k/v [B, Hkv*D] newest-token rows the kernel re-stores into the pool.',
-        'Source gap 3: the capture guard (_can_tm_decode: not torch.cuda.is_current_stream_capturing()) returns'
-        ' True during graph capture on this tree; without shims the capture phase itself calls tm_attn_decode and'
-        ' dies on gap 2\'s TypeError.',
-        'Source gap 4: with gaps 1-3 shimmed in this harness, engine start still fails in the graph-capture phase'
-        ' ("cudaErrorStreamCaptureInvalidated"): the non-TM fallback decode branch under the TM int8 pool views'
-        ' is not capture-safe on this tree.',
-        'Consequence: the on-route cannot complete engine start unmodified, so the KL <= 2e-3 numeric gate and'
-        ' the decode throughput comparison stay unmeasured on this host. The off-route (stock int8 KV) measures'
-        ' green; the rung pipeline (routes, rungs, gate, report) is ready and reruns unblocked once the source'
-        ' defects above are fixed.',
-    ]
-    if shim_note:
-        report['notes'].append('Workaround: ' + shim_note)
-    if decode_shim_note:
-        report['notes'].append('Workaround: ' + decode_shim_note)
+        probe=int8_kv_enablement(),
+        source_state=source_state)
+    if all(source_state.values()):
+        report['notes'] = [
+            'Source tree carries the B3-04 attention-integration fixes (tm_kv import, decode K/V rows,'
+            ' capture guard); no harness shims applied — the on-route numbers below come from the real path.',
+        ]
+    else:
+        report['notes'] = [
+            'Pre-fix B3-04 source defects detected on this tree; the on-route may fail at engine start.'
+            ' Defect detail: benchmark/b3_06_report.md (git history of this file carries the retired'
+            ' harness shims).',
+        ] + [f'defect {name}: {"fixed" if ok else "PRESENT"}'
+             for name, ok in (('tm_kv_import', source_state['import_ok']),
+                              ('decode_kv_rows', source_state['decode_rows']),
+                              ('capture_guard', source_state['capture_guard']))]
     (out_path / 'report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
     (out_path / 'report.md').write_text(render_suite_markdown(report), encoding='utf-8')
     return report

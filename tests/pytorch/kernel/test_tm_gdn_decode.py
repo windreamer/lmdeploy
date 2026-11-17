@@ -23,8 +23,10 @@ def gpu_ready():
 
 
 def make_meta(batch: int, input_ids: torch.Tensor, output_ids: torch.Tensor):
-    """Minimal indexed decode metadata. The decode branches only touch the
-    state ids and the phase flag."""
+    """Minimal indexed decode metadata.
+
+    The decode branches only touch the state ids and the phase flag.
+    """
     state_meta = SimpleNamespace(input_state_ids=input_ids, output_state_ids=output_ids)
     return SimpleNamespace(is_decoding=True, ssm_state_meta=state_meta)
 
@@ -55,8 +57,10 @@ def make_decode_inputs(batch, hv, head_dim, device='cuda'):
 
 
 def test_decline_reasons_cpu():
-    """Hard constraints reject without any device touch. Each constraint
-    yields its own reason fragment. The checks run on CPU."""
+    """Hard constraints reject without any device touch.
+
+    Each constraint yields its own reason fragment. The checks run on CPU.
+    """
     from lmdeploy.pytorch.backends.cuda.tm_gated_delta_rule import tm_gdn_decline_reason
     reasons = [
         tm_gdn_decline_reason(64, 8, torch.bfloat16, torch.float32),
@@ -71,7 +75,7 @@ def test_decline_reasons_cpu():
 
 
 def test_routing_env_off(monkeypatch):
-    """off routes straight to the fla-backed CUDA impl."""
+    """Off routes straight to the fla-backed CUDA impl."""
     import lmdeploy.pytorch.envs as envs
     from lmdeploy.pytorch.backends import get_backend
     from lmdeploy.pytorch.backends.cuda.gated_delta_rule import CudaGatedDeltaRuleImpl

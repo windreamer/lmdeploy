@@ -45,10 +45,10 @@ directly through `state_ptrs`. Env restored to default `auto`.
 ## Net gain vs the bridge version (44e0165e)
 
 | B (hv=32) | bridge full path | zero-copy eager | zero-copy graph replay |
-|---|---|---|---|
-| 1  | −83%  | −17% | **+8%** |
-| 8  | —     | −18% | **+75%** |
-| 32 | −148% | −12% | **+87%** |
+| --------- | ---------------- | --------------- | ---------------------- |
+| 1         | −83%             | −17%            | **+8%**                |
+| 8         | —                | −18%            | **+75%**               |
+| 32        | −148%            | −12%            | **+87%**               |
 
 Eager single-step numbers are host-enqueue-bound (both paths ~0.11–0.13 ms
 python per step); production decode runs under piecewise CUDA graphs, so the

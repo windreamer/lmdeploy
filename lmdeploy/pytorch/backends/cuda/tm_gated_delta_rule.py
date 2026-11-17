@@ -20,7 +20,7 @@ to the fla production kernels. Chunked prefill is never routed here:
 batch-2 measurements showed fla ahead on that regime.
 """
 
-from functools import lru_cache
+from functools import cache, lru_cache
 
 import torch
 import triton
@@ -61,17 +61,14 @@ def _gdn_pack_kernel(
     NORMALIZE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Fill the persistent decode step buffers and prepare the state rows
-    in one launch.
+    """Fill the persistent decode step buffers and prepare the state rows in
+    one launch.
 
-    q and k rows are l2 normalized when the production preprocess deferred
-    that to the fla kernel; v, g and beta transfer as-is. The same program
-    aligns its head's state slab with the decode source in pool layout:
-    checkpoint rebinding copies once, fresh history zero-fills, the common
-    case (destination equals source) touches nothing. Programs at head
-    zero fill the byte-address pointer array the recurrent kernel
-    consumes; invalid destinations clamp to slot zero under a finished
-    flag that keeps the store off.
+    q and k rows are l2 normalized when the production preprocess deferred that to the fla kernel; v, g and beta
+    transfer as-is. The same program aligns its head's state slab with the decode source in pool layout: checkpoint
+    rebinding copies once, fresh history zero-fills, the common case (destination equals source) touches nothing.
+    Programs at head zero fill the byte-address pointer array the recurrent kernel consumes; invalid destinations clamp
+    to slot zero under a finished flag that keeps the store off.
     """
     seq = tl.program_id(0).to(tl.int64)
     head = tl.program_id(1).to(tl.int64)
@@ -121,9 +118,9 @@ def _gdn_pack_kernel(
 
 
 def _gdn_pack(entry, q, k, v, g, beta, recurrent_state, input_ids, output_ids, batch, normalize: bool) -> None:
-    """Copy one decode step's preprocessed inputs into the persistent
-    buffers, normalizing q/k on the way when the caller asks, and prepare
-    the state rows plus pointer array."""
+    """Copy one decode step's preprocessed inputs into the persistent buffers,
+    normalizing q/k on the way when the caller asks, and prepare the state rows
+    plus pointer array."""
     bufs = entry['bufs']
     hq, hv, head_dim = bufs['q'].shape[2], bufs['v'].shape[2], bufs['q'].shape[3]
     row_elems = recurrent_state.stride(0)
@@ -156,13 +153,12 @@ def _gdn_pack(entry, q, k, v, g, beta, recurrent_state, input_ids, output_ids, b
     )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _tm_plan_decline(hv: int, input_dtype: str, state_dtype: str) -> str | None:
     """Probe whether the TurboMind planner accepts a recurrent workload.
 
-    Returns None when a plan can be built, else the decline reason. The
-    probe covers architecture-dependent availability (for example no path
-    exists on sm100) through the registered planner itself.
+    Returns None when a plan can be built, else the decline reason. The probe covers architecture-dependent availability
+    (for example no path exists on sm100) through the registered planner itself.
     """
     try:
         from lmdeploy.turbomind import _tm
@@ -220,8 +216,8 @@ def tm_gdn_decline_reason(head_dim: int, hv: int, input_dtype: torch.dtype,
 def build_level_decline_reason() -> str | None:
     """Architecture-level probe for the op build step.
 
-    Runs one generic plan probe (8 heads, bf16 input, f32 state).
-    Per-layer geometry is rechecked on the first decode step.
+    Runs one generic plan probe (8 heads, bf16 input, f32 state). Per-layer geometry is rechecked on the first decode
+    step.
     """
     return tm_gdn_decline_reason(128, 8, torch.bfloat16, torch.float32)
 
@@ -277,7 +273,8 @@ class TmGatedDeltaRuleImpl(CudaGatedDeltaRuleImpl):
 
     def _tm_decode(self, query, key, value, b, a, dt_bias, a_log_exp, recurrent_state, ids, batch, kv_ratio,
                    use_qk_l2norm_in_kernel):
-        """One zero-copy TurboMind recurrent step over the indexed state pool."""
+        """One zero-copy TurboMind recurrent step over the indexed state
+        pool."""
         q, k, g, beta, normalized = self.prepare_inputs(
             query,
             key,
@@ -322,9 +319,11 @@ class TmGatedDeltaRuleImpl(CudaGatedDeltaRuleImpl):
 
     def _tm_entry(self, batch: int, hq: int, hv: int, head_dim: int, dtype: torch.dtype, state_dtype: str,
                   device: torch.device) -> dict:
-        """Plan, persistent step buffers and prewrapped dlpack handles for
-        one workload signature. dlpack wrapping is pure host work on fixed
-        buffers; caching the handles keeps the decode step free of it."""
+        """Plan, persistent step buffers and prewrapped dlpack handles for one
+        workload signature.
+
+        dlpack wrapping is pure host work on fixed buffers; caching the handles keeps the decode step free of it.
+        """
         from lmdeploy.turbomind import _tm
 
         plan_key = (batch, hq, hv, head_dim, str(dtype), state_dtype, str(device))
@@ -384,4 +383,3 @@ class TmGatedDeltaRuleImpl(CudaGatedDeltaRuleImpl):
             context = _tm.create_device_context(stream_ptr)
             self._tm_contexts[stream_ptr] = context
         return context
-
