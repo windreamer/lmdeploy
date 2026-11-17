@@ -58,7 +58,8 @@ def const_case(name, H, D, param_dtype, B, P, ncols, layer):
 
 
 def mixed_chain_case(name):
-    """Exact replica of pytest mixed-chain ATen phase (bf16 params, randn bf16)."""
+    """Exact replica of pytest mixed-chain ATen phase (bf16 params, randn
+    bf16)."""
     H, D, B, PREFILL, STEPS = 8, 128, 4, 192, 64
     NB = B * ((PREFILL + STEPS) // S)
     layout, alloc = make_alloc(H, D, torch.bfloat16, NB)

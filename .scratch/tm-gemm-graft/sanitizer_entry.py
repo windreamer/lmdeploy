@@ -9,6 +9,7 @@ stays tolerable.
 import torch
 
 from lmdeploy.messages import QuantPolicy
+from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm
 from lmdeploy.turbomind import _tm
 
 S, D, H = 64, 128, 4
@@ -74,7 +75,6 @@ torch.cuda.synchronize()
 readers(PREFILL)
 
 # writer 2: triton-free ATen convert+scatter, decode-step append (1 token)
-from lmdeploy.pytorch.backends.tm_kv import fill_kv_cache_tm
 
 codes_v = pool[:, :2 * HSD].view(NB, H, 2, S, D)
 params_v = pool[:, 2 * HSD:].view(torch.bfloat16).view(NB, H, 2, S, 2)

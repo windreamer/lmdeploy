@@ -15,13 +15,13 @@ GPU:RTX 3090 24GB,驱动 580.178.04,CUDA 13.0,SM (8,6);`.venv/bin/python`,torch 
 
 本分支与 `upstream/main` 在下列文件上**逐字一致**(经 `git fetch upstream && git show upstream/main:…` 对照;`attn_bench_bind.cpp` 上游不存在,系本分支批 2 新增):
 
-| 约定 | 位置 | 内容 |
-| --- | --- | --- |
-| `params.k/v` 指向真实 K/V | `src/turbomind/models/llama/unified_attention_layer.cc:477,483` | `params.k = params.q + local_head_num * size_per_head;` / `params.v = params.k + local_kv_head_num * size_per_head;` — 指入当前 batch 的融合 qkv GEMM 输出([Q\|K\|V] 行,stride 含 gate 段),K/V 段是**真实值** |
-| 三个序列级缓冲恒为有效引擎缓冲 | 同上 `:533-535` | `cu_q_len = d.q_offsets.data() + offset`、`cu_k_len = d.k_offsets.data() + offset`、`readonly_block_num = d.readonly_block_num.data() + offset` — 永不为 null |
-| `readonly_block_num` 语义 | `unified_attention_layer.cc:110,263`;`src/turbomind/engine/scheduler.cc:666`(decode 步置 0,注释"decode writes only the new token");`:551-554`(resume 时按 fully-valid whole block 计数) | 只守卫 KV store(`ti < readonly_len` 跳过),decode 常规步为 0 |
-| 内核写回机制 | `src/turbomind/kernels/attention/attention_universal.h:59`(`kProcessKV`,DecodingCtaMap 恒真)、`:218,220`(Prologue 从 `params.k/v` Ldg)、`:262`(`ti = history_len`)、`:267`(`readonly_len`)、`:296`(`if (ti >= readonly_len)`)、`:306,314`(`Store(&k_cache[di], out_K)` + `StoreQuantParam`) | decode 每次调度必然读 `params.k/v`、做 rope、量化、写回池内 `ti = history_len` 位置(codes + per-token-per-head {scale,min} 参数) |
-| 块内 int8 布局 | `src/turbomind/kernels/attention/block.h:126-232`(`Layout`:data 段 per-head [K\|V],param 段在全 data 之后 per-head [Kp\|Vp]);`block_iterator.h:91-94`;PT 侧同款 `lmdeploy/pytorch/backends/tm_kv.py::TmInt8BlockCacheLayout.allocate` | `codes [nb,H,2,S,D] u8 + params [nb,H,2,S,2] bf16`,生产桥与本报告验证脚本均按此布局 |
+| 约定                           | 位置                                                                                                                                                                                                                                                                                        | 内容                                                                                                                                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `params.k/v` 指向真实 K/V      | `src/turbomind/models/llama/unified_attention_layer.cc:477,483`                                                                                                                                                                                                                             | `params.k = params.q + local_head_num * size_per_head;` / `params.v = params.k + local_kv_head_num * size_per_head;` — 指入当前 batch 的融合 qkv GEMM 输出(\[Q\|K\|V\] 行,stride 含 gate 段),K/V 段是**真实值** |
+| 三个序列级缓冲恒为有效引擎缓冲 | 同上 `:533-535`                                                                                                                                                                                                                                                                             | `cu_q_len = d.q_offsets.data() + offset`、`cu_k_len = d.k_offsets.data() + offset`、`readonly_block_num = d.readonly_block_num.data() + offset` — 永不为 null                                                   |
+| `readonly_block_num` 语义      | `unified_attention_layer.cc:110,263`;`src/turbomind/engine/scheduler.cc:666`(decode 步置 0,注释"decode writes only the new token");`:551-554`(resume 时按 fully-valid whole block 计数)                                                                                                     | 只守卫 KV store(`ti < readonly_len` 跳过),decode 常规步为 0                                                                                                                                                     |
+| 内核写回机制                   | `src/turbomind/kernels/attention/attention_universal.h:59`(`kProcessKV`,DecodingCtaMap 恒真)、`:218,220`(Prologue 从 `params.k/v` Ldg)、`:262`(`ti = history_len`)、`:267`(`readonly_len`)、`:296`(`if (ti >= readonly_len)`)、`:306,314`(`Store(&k_cache[di], out_K)` + `StoreQuantParam`) | decode 每次调度必然读 `params.k/v`、做 rope、量化、写回池内 `ti = history_len` 位置(codes + per-token-per-head {scale,min} 参数)                                                                                |
+| 块内 int8 布局                 | `src/turbomind/kernels/attention/block.h:126-232`(`Layout`:data 段 per-head \[K\|V\],param 段在全 data 之后 per-head \[Kp\|Vp\]);`block_iterator.h:91-94`;PT 侧同款 `lmdeploy/pytorch/backends/tm_kv.py::TmInt8BlockCacheLayout.allocate`                                                   | `codes [nb,H,2,S,D] u8 + params [nb,H,2,S,2] bf16`,生产桥与本报告验证脚本均按此布局                                                                                                                             |
 
 结论:生产 decode 的 `params.k/v` 是真实数据 ⇒ 内核写回 = 把新 token 的 KV 写到它该在的位置,幂等(同值重写);`readonly_block_num` 恒有效。**生产不会触发零写。**
 
@@ -46,8 +46,8 @@ GPU:RTX 3090 24GB,驱动 580.178.04,CUDA 13.0,SM (8,6);`.venv/bin/python`,torch 
 
 1. `src/turbomind/python/attn_bench_bind.cpp`
    - `BuildDecodePlan` 新增 `k`/`v` 形参;融合 qkv workspace 的 K/V 段按生产布局用 `cudaMemcpy2DAsync` 填入真实值(原来只填 Q,K/V 段未初始化);
-   - 新增 `DecodePlan::readonly_block_num` [B] int 零缓冲,`params.readonly_block_num` 指向它(不再 nullptr);
-   - `attn_decode_bench` / `tm_attn_decode` 增加 **必填** `k`/`v` 参数([B, Hkv*D],dtype 同 q;形状/类型 TM_CHECK);修正原注释中"K/V pointers … never dereferenced"的错误论断(该论断正是本缺陷根源);
+   - 新增 `DecodePlan::readonly_block_num` \[B\] int 零缓冲,`params.readonly_block_num` 指向它(不再 nullptr);
+   - `attn_decode_bench` / `tm_attn_decode` 增加 **必填** `k`/`v` 参数(\[B, Hkv\*D\],dtype 同 q;形状/类型 TM_CHECK);修正原注释中"K/V pointers … never dereferenced"的错误论断(该论断正是本缺陷根源);
    - pybind 签名:`"q"_a, "k"_a, "v"_a, …`。
 2. `benchmark/bench_attn_decode.py`
    - 新增 `last_token_kv()`:从预量化源池提取每序列最新 token 的 K/V 行;
@@ -79,13 +79,13 @@ correct layout yields 0.0005).
 
 ## 4. 验证记录(已执行)
 
-| 项 | 修复前 | 修复后 |
-| --- | --- | --- |
-| `repro_b304_defect.py`(旧 API) | **DEFECT REPRODUCED**(exit 0) | 预期:调用处因缺 k/v 失败(契约生效) |
-| `verify_b304_fix.py`(新 API) | — | **13/13 PASS,exit 0**(幂等 + 输出正确 + 负对照) |
-| `bench_attn_decode.py` 自带门禁(B=4,klen=256) | int8 TM max_abs **0.164**(错布局) | kv0 **0.0005** ok;kv8 **0.0005** ok(PT 0.0010) |
-| compute-sanitizer initcheck(`sanitizer_entry_b304.py`) | **100 处** Uninitialized(`Prologue Ldg params.k/v`,经 TmAttnDecode) | **ERROR SUMMARY: 0 errors**(exit 0) |
-| compute-sanitizer memcheck(同入口) | 4 errors | 4 errors,**逐条相同**(均为 `cudaErrorInvalidValue` @ `cudaFuncSetAttribute`/`cudaGetLastError`,属入口内其他内核路径的既有 API 告警,与本缺陷及修复无关,非访存错误) |
+| 项                                                     | 修复前                                                              | 修复后                                                                                                                                                            |
+| ------------------------------------------------------ | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repro_b304_defect.py`(旧 API)                         | **DEFECT REPRODUCED**(exit 0)                                       | 预期:调用处因缺 k/v 失败(契约生效)                                                                                                                                |
+| `verify_b304_fix.py`(新 API)                           | —                                                                   | **13/13 PASS,exit 0**(幂等 + 输出正确 + 负对照)                                                                                                                   |
+| `bench_attn_decode.py` 自带门禁(B=4,klen=256)          | int8 TM max_abs **0.164**(错布局)                                   | kv0 **0.0005** ok;kv8 **0.0005** ok(PT 0.0010)                                                                                                                    |
+| compute-sanitizer initcheck(`sanitizer_entry_b304.py`) | **100 处** Uninitialized(`Prologue Ldg params.k/v`,经 TmAttnDecode) | **ERROR SUMMARY: 0 errors**(exit 0)                                                                                                                               |
+| compute-sanitizer memcheck(同入口)                     | 4 errors                                                            | 4 errors,**逐条相同**(均为 `cudaErrorInvalidValue` @ `cudaFuncSetAttribute`/`cudaGetLastError`,属入口内其他内核路径的既有 API 告警,与本缺陷及修复无关,非访存错误) |
 
 日志:`benchmark/b304_verify/{initcheck,memcheck}_postfix.log`;修复前基线:`benchmark/b304_debug/{initcheck,memcheck}.log`。
 

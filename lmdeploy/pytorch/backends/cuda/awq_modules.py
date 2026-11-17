@@ -71,16 +71,16 @@ class AwqLinearW4A16Impl(LinearW4A16Impl):
 
 def _build_linear_w4a16(spec: LinearW4A16BuildSpec) -> LinearW4A16Impl:
     """Build the selected CUDA W4A16 linear implementation."""
-    provider = _envs.w4a16_gemm_backend
+    state = _envs.tm_kernel_state('w4a16')
 
-    if provider in ('auto', 'turbomind'):
+    if state in ('auto', 'on'):
         reason = turbomind_support_reason(spec.in_features, spec.out_features,
                                           spec.w_bit, spec.group_size, spec.output_dtype)
         if reason is None:
             from .tm_gemm_modules import TurbomindGemmW4A16Impl
             logger.debug('Build LinearW4A16 with TurbomindGemmW4A16Impl.')
             return TurbomindGemmW4A16Impl(spec.in_features, spec.out_features, spec.group_size)
-        elif provider == 'turbomind':
+        elif state == 'on':
             from lmdeploy import turbomind
 
             raise RuntimeError(

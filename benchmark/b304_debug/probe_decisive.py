@@ -54,7 +54,8 @@ def mixed_case(name, param_dtype):
 
 
 def single_token_case(name, param_dtype):
-    """One token written at (b0, slot 0); snapshot-diff lists every touched slot."""
+    """One token written at (b0, slot 0); snapshot-diff lists every touched
+    slot."""
     H, D, B = 8, 128, 4
     NB = 4
     alloc = make_alloc(H, D, param_dtype, NB)

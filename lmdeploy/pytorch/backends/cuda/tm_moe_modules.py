@@ -338,25 +338,27 @@ def tm_moe_route(group_size: int,
                  hidden_dim: int,
                  ffn_dim: int,
                  prefix: str = '') -> str | None:
-    """Decide the grouped MoE route with the dense W4A16 env semantics.
+    """Decide the grouped MoE route with the unified TM kernel semantics.
 
-    ``LMDEPLOY_W4A16_GEMM_BACKEND`` keeps its three states. ``auto`` probes
-    and reports the fallback reason. ``turbomind`` raises on an unsupported
-    layer. Any other value routes straight to the triton fused_moe path.
-    Returns None when the TurboMind grouped route serves this layer, else the
-    reason string.
+    ``LMDEPLOY_TM_KERNELS`` decides through the ``moe_grouped`` class;
+    with the big env silent for that class, the legacy
+    ``LMDEPLOY_W4A16_GEMM_BACKEND`` keeps its three states (ticket 02).
+    ``auto`` probes and reports the fallback reason. ``on`` raises on an
+    unsupported layer. ``off`` routes straight to the triton fused_moe
+    path. Returns None when the TurboMind grouped route serves this
+    layer, else the reason string.
     """
-    provider = _envs.w4a16_gemm_backend
+    state = _envs.tm_kernel_state('moe_grouped')
     label = prefix or 'w4a16_moe'
     shapes = f'{hidden_dim}x{ffn_dim}'
-    if provider not in ('auto', 'turbomind'):
-        logger.info(f'W4A16 MoE GEMM routing: {label} [{shapes}] -> fused_moe triton (backend={provider}).')
-        return f'W4A16 GEMM backend={provider}'
+    if state == 'off':
+        logger.info(f'W4A16 MoE GEMM routing: {label} [{shapes}] -> fused_moe triton (backend={state}).')
+        return f'W4A16 GEMM backend={state}'
     reason = turbomind_moe_support_reason(hidden_dim, ffn_dim, w_bit, group_size, dtype)
     if reason is None:
-        logger.info(f'W4A16 MoE GEMM routing: {label} [{shapes}] -> turbomind (backend={provider}).')
+        logger.info(f'W4A16 MoE GEMM routing: {label} [{shapes}] -> turbomind (backend={state}).')
         return None
-    if provider == 'turbomind':
+    if state == 'on':
         from lmdeploy import turbomind
 
         raise RuntimeError(
@@ -374,9 +376,10 @@ def _build_fused_moe_tm(spec: FusedMoETmW4A16BuildSpec) -> FusedMoETmW4A16Impl:
     flip between the two build steps. Fail loudly instead of silently
     switching the weight layout.
     """
-    if _envs.w4a16_gemm_backend not in ('auto', 'turbomind'):
+    if _envs.tm_kernel_state('moe_grouped') == 'off':
         raise RuntimeError(
-            f'TurboMind grouped MoE spec built while LMDEPLOY_W4A16_GEMM_BACKEND={_envs.w4a16_gemm_backend}; '
+            'TurboMind grouped MoE spec built while the moe_grouped kernel state is off '
+            '(LMDEPLOY_TM_KERNELS or LMDEPLOY_W4A16_GEMM_BACKEND); '
             'the route decision and the operator build disagree.')
     return TurbomindMoeW4A16Impl(
         top_k=spec.top_k,

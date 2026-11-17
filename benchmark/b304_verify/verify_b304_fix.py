@@ -46,7 +46,8 @@ off = lambda p: p % S
 
 
 def quant_kv(kv):
-    """TM-style per-token-per-head min-max u8 quant; returns (codes, scale, min)."""
+    """TM-style per-token-per-head min-max u8 quant; returns (codes, scale,
+    min)."""
     vmin = kv.amin(dim=-1, keepdim=True)
     vmax = kv.amax(dim=-1, keepdim=True)
     scale = ((vmax - vmin) / 255.0).clamp(min=1e-6)
@@ -128,7 +129,7 @@ def snapshot_bf16(pool, p):
 
 
 def reference(pool, kv_quant):
-    """fp32 decode reference over the pool's (dequantized) contents."""
+    """Fp32 decode reference over the pool's (dequantized) contents."""
     if kv_quant == 8:
         codes = pool[:, :2 * H * S * D].view(NB, H, 2, S, D).float()
         params = pool[:, 2 * H * S * D:].view(torch.bfloat16).view(NB, H, 2, S, 2).float()

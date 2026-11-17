@@ -17,7 +17,7 @@ kernel-side defect (xfailed, owned by src/turbomind).
 - `probe_stepdiff.py` — 64 sequential steps, all confined to expected slots.
 - `probe_reconcile.py` — contradiction resolver (right slots, wrong values
   when fed b-major rows).
-- `probe_provenance.py` — provenance of a "wrong" slot: contained kt[3, p0]
+- `probe_provenance.py` — provenance of a "wrong" slot: contained kt\[3, p0\]
   = flat b-major row 768 with 1.0 code match => the TEST fed b-major rows
   where the packed contract requires batch-major truncation.
 - `sanitizer_entry_b304.py` + `memcheck.log` / `initcheck.log` — sanitizer
