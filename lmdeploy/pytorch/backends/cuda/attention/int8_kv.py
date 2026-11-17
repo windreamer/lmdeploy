@@ -10,11 +10,12 @@ K outside attention); decode steps dispatch the TM decode kernel
 - prefill / chunked prefill attention runs the stock Triton path on the
   layout's strided views, with (scale, min) slots converted to the PT
   (scale, zero) convention per step;
-- decode steps dispatch the TM decode kernel (`_tm.tm_attn_decode`) on eager
-  steps; during CUDA graph capture the metadata carries padded capture
-  buffers the binding cannot consume, so capture takes the capture-safe
-  Triton paged-attention fallback over the pool views (no stream queries or
-  D2H syncs) instead;
+- decode steps dispatch the TM decode kernel (`_tm.tm_attn_decode`); under
+  CUDA graph capture the graph-safe binding entry (`_tm.tm_attn_decode_graph`)
+  runs instead: persistent caller-owned buffers (device cu_q_len/cu_k_len,
+  one workspace) make replay follow per-step buffer content bit-exactly, so
+  TM decode participates in full-graph and piecewise capture; only a missing
+  native module falls back to the capture-safe Triton paged-attention path;
 - non-INT8 runtime quant policies behave exactly like `TritonAttentionImpl`
   (the pool then uses the default layout, matched by the same opt-in
   decision that built this impl).
@@ -135,6 +136,105 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         """DLPack-wrap a torch tensor for the TurboMind bindings."""
         return self._tm.from_dlpack(tensor)
 
+    def _graph_state(self, num_seqs: int, num_heads: int, num_kv_heads: int, head_dim: int, device: torch.device):
+        """Persistent buffers for the graph-captured TM decode binding.
+
+        The binding contract (`tm_attn_decode_graph`) requires every plan
+        buffer to live at a stable address across capture and replay:
+
+        - `cu_q_len`/`cu_k_len`: cumulative device lengths, rewritten by
+          captured ops each step (device-side cumsum of the runner-filled
+          `q_seqlens`/`kv_seqlens` buffers) — per-sequence lengths then
+          reach the kernel inside the graph (binding defect ③ fixed);
+        - `workspace`: one persistent byte buffer holding the binding's
+          plan state (fused qkv staging, finished/readonly/split flags,
+          split-K partials) at binding-defined offsets — capture records no
+          allocation/free nodes (defect ② fixed).
+
+        Buffers are keyed by capture shape so different graphs (batch
+        sizes) own disjoint persistent state.
+        """
+        key = (num_seqs, num_heads, num_kv_heads, head_dim, device)
+        state = getattr(self, '_tm_graph_state', None)
+        if state is not None and state['key'] == key:
+            return state
+        ws_bytes = self._tm.tm_decode_workspace_bytes(num_seqs, num_heads, num_kv_heads, head_dim,
+                                                      query.element_size())
+        state = {
+            'key': key,
+            'cu_q_len': torch.zeros(num_seqs + 1, dtype=torch.int32, device=device),
+            'cu_k_len': torch.zeros(num_seqs + 1, dtype=torch.int32, device=device),
+            'workspace': torch.zeros(ws_bytes, dtype=torch.uint8, device=device),
+        }
+        self._tm_graph_state = state
+        return state
+
+    def _forward_tm_decode_graph(
+        self,
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        attn_metadata: TritonAttentionMetadata,
+    ) -> torch.Tensor:
+        """One decode step through the graph-safe TM decode binding.
+
+        Runs identically for eager steps and graph capture/replay: every per-step input is content of a persistent
+        buffer (capture-pool tensors during capture), rewritten by captured device ops, so replay follows new
+        q/k/v/seqlen content bit-exactly.
+        """
+        tm = self._tm_module()
+        pool_base, block_bytes, block_len, num_kv_heads, head_dim = self._pool_geometry(k_cache)
+        num_seqs = attn_metadata.kv_seqlens.shape[0]
+        num_heads = query.shape[-2]
+        gs = self._graph_state(num_seqs, num_heads, num_kv_heads, head_dim, query.device)
+
+        q = query.reshape(num_seqs, -1).contiguous()
+        out = torch.empty((num_seqs, num_heads * head_dim), dtype=query.dtype, device=query.device)
+        ptrs, cu_block_base = self._pointer_tables(k_cache, attn_metadata)
+
+        # Device-side cumulative lengths from the (runner-filled) metadata
+        # buffers; captured as ops, re-executed on every replay.
+        gs['cu_q_len'][1:].copy_(torch.cumsum(attn_metadata.q_seqlens.to(torch.int32), 0))
+        gs['cu_q_len'][0].zero_()
+        gs['cu_k_len'][1:].copy_(torch.cumsum(attn_metadata.kv_seqlens.to(torch.int32), 0))
+        gs['cu_k_len'][0].zero_()
+
+        # Capacity bound frozen at capture: grid/split schedule derives from
+        # it, while true per-sequence lengths come from `cu_k_len` on device
+        # (masking and store placement follow the real lengths, so padded
+        # capacity never pollutes softmax or the pool tail).
+        max_k_len = attn_metadata.block_offsets.shape[1] * block_len
+
+        # The binding re-stores the newest-token K/V rows into the pool, so
+        # it needs the [B, Hkv*D] rows of this step's new token per sequence;
+        # forward stashes them in _tm_last_new_kv before the pool fill.
+        key, value = getattr(self, '_tm_last_new_kv', (None, None))
+        if key is None or value is None:
+            raise RuntimeError('TM int8 decode: no new-token K/V captured for this step')
+        rows = attn_metadata.q_start_loc.to(torch.long)
+        k_rows = key.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
+        v_rows = value.index_select(0, rows).reshape(num_seqs, num_kv_heads * head_dim).contiguous()
+        tm.tm_attn_decode_graph(
+            self._wrap(q),
+            self._wrap(k_rows),
+            self._wrap(v_rows),
+            self._wrap(out),
+            ptrs.data_ptr(),
+            cu_block_base.data_ptr(),
+            gs['cu_q_len'].data_ptr(),
+            gs['cu_k_len'].data_ptr(),
+            gs['workspace'].data_ptr(),
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            batch_size=num_seqs,
+            block_len=block_len,
+            max_k_len=max_k_len,
+            kv_quant=8,
+            stream_ptr=torch.cuda.current_stream(query.device).cuda_stream,
+        )
+        return out.view(num_seqs, num_heads, head_dim)
+
     def _forward_tm_decode(
         self,
         query: torch.Tensor,
@@ -153,6 +253,8 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
         # No D2H sync here: a `.max()` fallback on kv_seqlens would invalidate
         # graph capture; fall back to the Triton path instead.
         max_k_len = attn_metadata.max_kv_seqlen
+        if torch.cuda.is_current_stream_capturing():
+            return self._forward_tm_decode_graph(query, k_cache, v_cache, attn_metadata)
         if max_k_len is None:
             return self._forward_triton_decode(query, k_cache, v_cache, attn_metadata)
         # The binding re-stores the newest-token K/V rows into the pool, so it
@@ -190,15 +292,20 @@ class TmInt8KVAttentionImpl(TritonAttentionImpl):
             v_scales_zeros=self._pt_scales(getattr(self, '_tm_v_scales_zeros', None)))
 
     def _can_tm_decode(self, attn_metadata: TritonAttentionMetadata) -> bool:
-        """TM decode covers single-token eager decode steps.
+        """TM decode covers single-token decode steps, eager and captured.
 
-        During graph capture the metadata carries padded capture buffers (max_kv_seqlen, seqlens), which the TM decode
-        binding cannot consume safely, so capture takes the capture-safe Triton fallback instead; replay keeps the pool
-        reads/writes on the same TM-managed storage.
+        During graph capture the graph-safe binding entry
+        (`tm_attn_decode_graph`) is used: all plan state lives in persistent
+        caller-owned buffers (device cu_q_len/cu_k_len, one workspace) and
+        per-step content reaches replay via captured device-side fills, so
+        capture no longer needs the Triton fallback. Capture falls back to
+        Triton only when the native module is unavailable.
         """
         if attn_metadata.max_q_seqlen is not None and attn_metadata.max_q_seqlen != 1:
             return False
-        return not torch.cuda.is_current_stream_capturing()
+        if not torch.cuda.is_current_stream_capturing():
+            return True
+        return self._tm_module() is not None
 
     def _pt_scales(self, scales: torch.Tensor) -> torch.Tensor | None:
         """Rewrite (scale, min) slots to (scale, zero) for Triton readers."""

@@ -52,6 +52,52 @@ struct DecodePlan {
     core::Tensor_<float> partial_ML;
 };
 
+// Deterministic byte layout of the graph-path decode workspace. Every plan
+// buffer lives at a fixed offset inside one caller-owned persistent buffer,
+// so a capture-time dispatch records **zero** allocation nodes (the eager
+// path's per-call `cudaMallocAsync` plan buffers showed up as 8 free / 0
+// alloc nodes and made replay consume freed memory). Offsets are 256-byte
+// aligned and identical for both `tm_decode_workspace_bytes` (Python-side
+// sizing) and `TmAttnDecodeGraph` (dispatch), by construction.
+struct DecodeWorkspaceLayout {
+    size_t qkv;
+    size_t finished;
+    size_t readonly_block_num;
+    size_t split_cnt;
+    size_t partial_O;
+    size_t partial_ML;
+    size_t total;
+
+    static constexpr size_t Align(size_t x)
+    {
+        return (x + 255) & ~(size_t)255;
+    }
+
+    // `elem_size` is sizeof(q dtype); `max_split_k` follows the eager path's
+    // `kMaxWorkspaceTokens` budget exactly.
+    static int MaxSplitK(int batch_size)
+    {
+        constexpr int kMaxSplitK          = 128;
+        constexpr int kMaxWorkspaceTokens = 4096;
+        return std::min(std::max(1, kMaxWorkspaceTokens / batch_size), kMaxSplitK);
+    }
+
+    static DecodeWorkspaceLayout Make(int batch_size, int num_heads, int num_kv_heads, int head_dim, size_t elem_size)
+    {
+        DecodeWorkspaceLayout l{};
+        const int             max_split_k = MaxSplitK(batch_size);
+        const size_t          row         = (size_t)(num_heads + 2 * num_kv_heads) * head_dim * elem_size;
+        l.qkv                             = 0;
+        l.finished                        = Align(l.qkv + row * batch_size);
+        l.readonly_block_num              = Align(l.finished + batch_size * sizeof(bool));
+        l.split_cnt                       = Align(l.readonly_block_num + batch_size * sizeof(int));
+        l.partial_O                       = Align(l.split_cnt + batch_size * sizeof(int));
+        l.partial_ML = Align(l.partial_O + (size_t)batch_size * num_heads * max_split_k * head_dim * sizeof(float));
+        l.total      = Align(l.partial_ML + (size_t)batch_size * num_heads * max_split_k * 2 * sizeof(float));
+        return l;
+    }
+};
+
 // Fill `AttentionParams` the same way `UnifiedAttentionLayer` does (decode
 // path, `CreateParams`). `q`/`k`/`v` are [B, H*D] / [B, Hkv*D] /
 // [B, Hkv*D] contiguous and must hold the caller's real values: the decoding
@@ -271,6 +317,220 @@ std::vector<float> RunDecodeBench(const core::Tensor& q,
         TM_CUDA_CHECK(cudaEventDestroy(end[i]));
     }
     return ms;
+}
+
+// CUDA-graph-safe single-shot decode. Contract with the Python caller (all
+// buffers allocated and filled OUTSIDE/INSIDE capture but always persistent
+// across replays):
+// - `q`/`k`/`v`: persistent device rows whose CONTENT is rewritten per step
+//   (captured D2D memcpy2D nodes re-read their current contents on replay);
+// - `cu_q_len`/`cu_k_len`: caller-owned device int32[B+1] cumulative
+//   lengths; the params point at them directly, so per-sequence lengths are
+//   read by the kernel at run time (this is what makes prefix growth and
+//   per-seq masking representable inside a graph — defect ③ of the audit);
+// - `workspace`: caller-owned persistent byte buffer laid out per
+//   `DecodeWorkspaceLayout`; the dispatch performs no allocation and no
+//   free, so capture records zero alloc/free nodes (defect ②);
+// - no host-stack sources are captured: `finished`/`readonly_block_num`/
+//   `split_cnt` are captured memset nodes and `cu_*_len` are caller buffers
+//   (defect ①).
+// `max_k_len` is the CAPACITY bound frozen at capture (grid/split schedule
+// is derived from it host-side); correctness for shorter sequences comes
+// from the device `cu_k_len`, which the kernel consumes per sequence
+// (`attention_universal.h` reads `cu_k_len` at run time).
+template<class T>
+void DispatchDecodeGraph(const core::Tensor& q,
+                         const core::Tensor& k,
+                         const core::Tensor& v,
+                         core::Tensor&       out,
+                         char**              block_ptrs,
+                         const int*          cu_block_nums,
+                         const int*          cu_q_len,
+                         const int*          cu_k_len,
+                         char*               workspace,
+                         int                 num_heads,
+                         int                 num_kv_heads,
+                         int                 head_dim,
+                         int                 batch_size,
+                         int                 block_len,
+                         int                 max_k_len,
+                         int                 quant_policy,
+                         cudaStream_t        stream)
+{
+    TM_CHECK_EQ(k.size(), (size_t)batch_size * num_kv_heads * head_dim) << "k must be [B, Hkv*D] contiguous";
+    TM_CHECK_EQ(v.size(), (size_t)batch_size * num_kv_heads * head_dim) << "v must be [B, Hkv*D] contiguous";
+    TM_CHECK_EQ(k.dtype(), q.dtype()) << "k dtype must match q";
+    TM_CHECK_EQ(v.dtype(), q.dtype()) << "v dtype must match q";
+    TM_CHECK_NE(cu_q_len, nullptr) << "device cu_q_len is required";
+    TM_CHECK_NE(cu_k_len, nullptr) << "device cu_k_len is required";
+    TM_CHECK_NE(workspace, nullptr) << "persistent workspace is required";
+
+    const auto layout = DecodeWorkspaceLayout::Make(batch_size, num_heads, num_kv_heads, head_dim, sizeof(T));
+
+    AttentionParams<T> params{};
+
+    // Fused [B, (H + 2Hkv) * D] qkv row per token, filled by captured D2D
+    // memcpy2D nodes from the caller's persistent q/k/v rows.
+    const size_t q_bytes   = num_heads * head_dim * sizeof(T);
+    const size_t kv_bytes  = num_kv_heads * head_dim * sizeof(T);
+    const size_t row_bytes = (num_heads + 2 * num_kv_heads) * head_dim * sizeof(T);
+    char*        qkv_base  = workspace + layout.qkv;
+    {
+        TM_CUDA_CHECK(cudaMemcpy2DAsync(
+            qkv_base, row_bytes, q.raw_data(), q_bytes, q_bytes, batch_size, cudaMemcpyDeviceToDevice, stream));
+        TM_CUDA_CHECK(cudaMemcpy2DAsync(qkv_base + q_bytes,
+                                        row_bytes,
+                                        k.raw_data(),
+                                        kv_bytes,
+                                        kv_bytes,
+                                        batch_size,
+                                        cudaMemcpyDeviceToDevice,
+                                        stream));
+        TM_CUDA_CHECK(cudaMemcpy2DAsync(qkv_base + q_bytes + kv_bytes,
+                                        row_bytes,
+                                        v.raw_data(),
+                                        kv_bytes,
+                                        kv_bytes,
+                                        batch_size,
+                                        cudaMemcpyDeviceToDevice,
+                                        stream));
+    }
+
+    params.out    = (T*)out.raw_data();
+    params.q      = (T*)qkv_base;
+    params.k      = params.q + num_heads * head_dim;
+    params.v      = params.k + num_kv_heads * head_dim;
+    params.stride = (num_heads + 2 * num_kv_heads) * head_dim;
+
+    params.batch_size = batch_size;
+    params.token_num  = batch_size;
+    params.max_q_len  = 1;
+    params.max_k_len  = max_k_len;
+
+    params.block_iter_params = BlockIteratorParams{block_ptrs, cu_block_nums, 0, block_len};
+
+    bool* finished_ptr        = (bool*)(workspace + layout.finished);
+    int*  readonly_ptr        = (int*)(workspace + layout.readonly_block_num);
+    params.finished           = finished_ptr;
+    params.cu_q_len           = cu_q_len;
+    params.cu_k_len           = cu_k_len;
+    params.token_mask         = nullptr;
+    params.readonly_block_num = readonly_ptr;
+
+    TM_CUDA_CHECK(cudaMemsetAsync(finished_ptr, 0, sizeof(bool) * batch_size, stream));
+    TM_CUDA_CHECK(cudaMemsetAsync(readonly_ptr, 0, sizeof(int) * batch_size, stream));
+
+    params.num_heads     = num_heads;
+    params.num_kv_heads  = num_kv_heads;
+    params.size_per_head = head_dim;
+    params.inv_sqrt_dh   = (float)std::log2(expf(1.f)) / std::sqrt((float)head_dim);
+    params.window_size   = 256 << 20;
+
+    params.rope_param      = RopeKernelParam{};
+    params.rope_param.type = RopeType::kNull;
+
+    const int max_split_k = DecodeWorkspaceLayout::MaxSplitK(batch_size);
+    params.split_cnt      = (int*)(workspace + layout.split_cnt);
+    params.partial_O      = (float*)(workspace + layout.partial_O);
+    params.partial_ML     = (float*)(workspace + layout.partial_ML);
+    params.max_split_k    = max_split_k;
+    TM_CUDA_CHECK(cudaMemsetAsync(params.split_cnt, 0, sizeof(int) * batch_size, stream));
+
+    params.arch         = getSMVersion();
+    params.stream       = stream;
+    params.quant_policy = quant_policy;
+
+    dispatchDecoding<T>(params);
+}
+
+size_t TmDecodeWorkspaceBytes(int batch_size, int num_heads, int num_kv_heads, int head_dim, size_t elem_size)
+{
+    TM_CHECK(batch_size > 0) << "batch_size must be positive";
+    return DecodeWorkspaceLayout::Make(batch_size, num_heads, num_kv_heads, head_dim, elem_size).total;
+}
+
+void TmAttnDecodeGraph(const std::shared_ptr<core::Tensor>& q,
+                       const std::shared_ptr<core::Tensor>& k,
+                       const std::shared_ptr<core::Tensor>& v,
+                       std::shared_ptr<core::Tensor>        out,
+                       std::uintptr_t                       block_ptrs_addr,
+                       std::uintptr_t                       cu_block_nums_addr,
+                       std::uintptr_t                       cu_q_len_addr,
+                       std::uintptr_t                       cu_k_len_addr,
+                       std::uintptr_t                       workspace_addr,
+                       int                                  num_heads,
+                       int                                  num_kv_heads,
+                       int                                  head_dim,
+                       int                                  batch_size,
+                       int                                  block_len,
+                       int                                  max_k_len,
+                       int                                  kv_quant,
+                       std::uintptr_t                       stream_addr)
+{
+    TM_CHECK_EQ(q->shape(0), batch_size) << "q rows must equal batch_size";
+    TM_CHECK_EQ(q->size(), (size_t)batch_size * num_heads * head_dim) << "q must be [B, H*D] contiguous";
+    TM_CHECK(kv_quant == 0 || kv_quant == 4 || kv_quant == 8) << "kv_quant must be one of 0, 4, 8";
+    TM_CHECK(out != nullptr) << "out tensor is required";
+
+    auto       stream        = (cudaStream_t)stream_addr;
+    char**     block_ptrs    = (char**)block_ptrs_addr;
+    const int* cu_block_nums = (const int*)cu_block_nums_addr;
+    const int* cu_q_len      = (const int*)cu_q_len_addr;
+    const int* cu_k_len      = (const int*)cu_k_len_addr;
+    char*      workspace     = (char*)workspace_addr;
+
+    int quant_policy = 0;
+    if (kv_quant == 8) {
+        quant_policy = QuantPolicy::kCacheKVInt8;
+    }
+    else if (kv_quant == 4) {
+        quant_policy = QuantPolicy::kCacheKVInt4;
+    }
+
+    // No allocations below: safe under CUDA graph capture.
+    py::gil_scoped_release release;
+    if (q->dtype() == kBfloat16) {
+        DispatchDecodeGraph<nv_bfloat16>(*q,
+                                         *k,
+                                         *v,
+                                         *out,
+                                         block_ptrs,
+                                         cu_block_nums,
+                                         cu_q_len,
+                                         cu_k_len,
+                                         workspace,
+                                         num_heads,
+                                         num_kv_heads,
+                                         head_dim,
+                                         batch_size,
+                                         block_len,
+                                         max_k_len,
+                                         quant_policy,
+                                         stream);
+    }
+    else if (q->dtype() == kFloat16) {
+        DispatchDecodeGraph<half>(*q,
+                                  *k,
+                                  *v,
+                                  *out,
+                                  block_ptrs,
+                                  cu_block_nums,
+                                  cu_q_len,
+                                  cu_k_len,
+                                  workspace,
+                                  num_heads,
+                                  num_kv_heads,
+                                  head_dim,
+                                  batch_size,
+                                  block_len,
+                                  max_k_len,
+                                  quant_policy,
+                                  stream);
+    }
+    else {
+        TM_CHECK(0) << "q dtype must be bf16 or fp16, got: " << to_string(q->dtype());
+    }
+    TM_CUDA_CHECK(cudaGetLastError());
 }
 
 py::list AttnDecodeBench(const std::shared_ptr<core::Tensor>& q,
@@ -592,6 +852,40 @@ void bind_attn_bench(py::module_& m)
           "[B, Hkv*D] must hold the real K/V rows of the newest token "
           "(ti = k_len - 1): the kernel re-stores them (rope'd, quantized) "
           "into the pool, mirroring production decode.");
+
+    m.def("tm_decode_workspace_bytes",
+          &TmDecodeWorkspaceBytes,
+          "batch_size"_a,
+          "num_heads"_a,
+          "num_kv_heads"_a,
+          "head_dim"_a,
+          "elem_size"_a,
+          "Persistent workspace byte count for `tm_attn_decode_graph`.");
+
+    m.def("tm_attn_decode_graph",
+          &TmAttnDecodeGraph,
+          "q"_a,
+          "k"_a,
+          "v"_a,
+          "out"_a,
+          "block_ptrs_addr"_a,
+          "cu_block_nums_addr"_a,
+          "cu_q_len_addr"_a,
+          "cu_k_len_addr"_a,
+          "workspace_addr"_a,
+          "num_heads"_a,
+          "num_kv_heads"_a,
+          "head_dim"_a,
+          "batch_size"_a,
+          "block_len"_a,
+          "max_k_len"_a,
+          "kv_quant"_a   = 0,
+          "stream_ptr"_a = std::uintptr_t{0},
+          "CUDA-graph-safe decode dispatch: all plan state lives in "
+          "caller-owned persistent buffers (device cu_q_len/cu_k_len, "
+          "workspace); no allocation, no host-stack H2D. Capture records "
+          "only kernel/memcpy/memset nodes; replay follows per-step buffer "
+          "content. `max_k_len` is the frozen capacity bound.");
 
     m.def("tm_process_kv",
           &TmProcessKV,

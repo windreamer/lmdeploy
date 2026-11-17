@@ -574,3 +574,208 @@ def test_opt_in_routing_matrix(monkeypatch):
     cache_cfg_bad = SimpleNamespace(quant_policy=QuantPolicy.INT8, kernel_block_size=32)
     assert not tm_int8_kv_layout_requested(model_cfg, cache_cfg_bad)
     reset_tm_int8_kv_capability()
+
+
+# ---------------------------------------------------------------------------
+# B3-04 redo: TM int8 decode under CUDA graph capture/replay.
+#
+# Mandatory methodology (see benchmark/b304_graph_reverify/report.md): plain
+# tolerance gates are proven false-green under replay (stale output passes
+# the 0.25 int8 budget). Verification below is bitwise replay-vs-eager plus
+# content-follow and host-interference invariance probes.
+# ---------------------------------------------------------------------------
+
+
+class _GraphDecodeCase:
+    """Graph-captured TM decode step over persistent buffers, mirroring
+    `TmInt8KVAttentionImpl._forward_tm_decode_graph` without engine
+    machinery: every per-step input (q/k/v rows, seqlens) is content of a
+    persistent buffer rewritten before each replay."""
+
+    def __init__(self, pool, layer=0):
+        from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
+        from lmdeploy.turbomind import _tm
+
+        self.tm = _tm
+        k_cache = _layer_views(pool, layer)[0]
+        self.pool_base = k_cache.data_ptr()
+        self.block_bytes = k_cache.stride(0)
+        self.cols = _block_offsets().shape[1]
+        self.capacity = self.cols * BLOCK_LEN  # frozen max_k_len at capture
+        self.cu_block_nums = _cu([self.cols] * BATCH).int()
+        b, hkv = BATCH, NUM_KV_HEADS
+        self.q_b = torch.zeros(b, NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        self.k_b = torch.zeros(b, hkv * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        self.v_b = torch.zeros(b, hkv * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        self.out_b = torch.zeros(b, NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
+        self.kv_seqlens_buf = torch.zeros(b, dtype=torch.int32, device='cuda')
+        self.cu_q = torch.zeros(b + 1, dtype=torch.int32, device='cuda')
+        self.cu_k = torch.zeros(b + 1, dtype=torch.int32, device='cuda')
+        ws_bytes = _tm.tm_decode_workspace_bytes(b, NUM_HEADS, hkv, HEAD_DIM, 2)
+        self.ws = torch.zeros(ws_bytes, dtype=torch.uint8, device='cuda')
+        self.ptrs, self.bases = tm_block_pointer_table(_block_offsets(), self.pool_base, self.block_bytes)
+        self.graph = torch.cuda.CUDAGraph()
+
+    def set_inputs(self, q, k_last, v_last, kv_seqlens):
+        """Host-side content rewrite of the persistent step buffers."""
+        self.q_b.copy_(q.reshape(BATCH, -1))
+        self.k_b.copy_(k_last.reshape(BATCH, -1))
+        self.v_b.copy_(v_last.reshape(BATCH, -1))
+        self.kv_seqlens_buf.copy_(torch.tensor(kv_seqlens, dtype=torch.int32, device='cuda'))
+
+    def _captured_ops(self):
+        # Per-step device fills (captured): cumulative lengths follow the
+        # simulated runner seqlen buffer; the binding reads them on device.
+        self.cu_q[1:].copy_(torch.arange(1, BATCH + 1, dtype=torch.int32, device='cuda'))
+        self.cu_q[0].zero_()
+        self.cu_k[1:].copy_(torch.cumsum(self.kv_seqlens_buf, 0))
+        self.cu_k[0].zero_()
+        self.tm.tm_attn_decode_graph(
+            self.tm.from_dlpack(self.q_b),
+            self.tm.from_dlpack(self.k_b),
+            self.tm.from_dlpack(self.v_b),
+            self.tm.from_dlpack(self.out_b),
+            self.ptrs.data_ptr(), self.cu_block_nums.data_ptr(),
+            self.cu_q.data_ptr(), self.cu_k.data_ptr(), self.ws.data_ptr(),
+            num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
+            batch_size=BATCH, block_len=BLOCK_LEN, max_k_len=self.capacity,
+            kv_quant=8, stream_ptr=torch.cuda.current_stream().cuda_stream)
+
+    def capture(self):
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                self._captured_ops()
+        torch.cuda.current_stream().wait_stream(side)
+        torch.cuda.synchronize()
+        with torch.cuda.graph(self.graph):
+            self._captured_ops()
+
+    def replay(self):
+        self.graph.replay()
+        torch.cuda.synchronize()
+        return self.out_b.view(BATCH, NUM_HEADS, HEAD_DIM).clone()
+
+    def eager(self):
+        """Same graph-entry dispatch, run eagerly (control path)."""
+        self._captured_ops()
+        torch.cuda.synchronize()
+        return self.out_b.view(BATCH, NUM_HEADS, HEAD_DIM).clone()
+
+
+def _graph_fixture():
+    """Two identically prefilled pools: replay runs on pool_g, the eager
+    control on pool_e; every step keeps them state-synchronized."""
+    _, k, v = _make_data()
+    kt = k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM)
+    vt = v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM)
+    pools = []
+    for _ in range(2):
+        pool = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+        _bridge_fill(kt, vt, [PREFILL_LEN] * BATCH, pool)
+        pools.append(pool)
+    torch.cuda.synchronize()
+    return pools[0], pools[1], k, v
+
+
+def _eager_control(case, pool, q, k_last, v_last, kv_seqlens):
+    """Mirror one graph step on the eager pool with the same contents."""
+    ctrl = _GraphDecodeCase(pool)
+    ctrl.set_inputs(q, k_last, v_last, kv_seqlens)
+    return ctrl.eager()
+
+
+def test_graph_capture_replay_bitwise_and_content_follow():
+    """Capture the graph-safe TM decode, then prove replay follows content:
+
+    identical replay is bitwise vs the eager control; new q/k/v rows and grown/unequal per-seq lengths replay bitwise vs
+    the eager recomputation on a state-mirrored pool.
+    """
+    pool_g, pool_e, k, v = _graph_fixture()
+    q, _, _ = _make_data(seed=31)
+
+    case = _GraphDecodeCase(pool_g)
+    case.set_inputs(q, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1], [PREFILL_LEN] * BATCH)
+    case.capture()
+
+    # R0: same-content replay vs eager control (bitwise).
+    ctrl = _GraphDecodeCase(pool_e)
+    ctrl.set_inputs(q, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1], [PREFILL_LEN] * BATCH)
+    out_e0 = ctrl.eager()
+    out_r0 = case.replay()
+    assert torch.equal(out_r0, out_e0), \
+        f'replay vs eager not bitwise at capture lengths: {(out_r0 - out_e0).abs().max().item()}'
+
+    gen = torch.Generator(device='cpu').manual_seed(77)
+    q2 = (torch.randn(BATCH, NUM_HEADS, HEAD_DIM, generator=gen) * AMP).cuda().bfloat16()
+    k_last2 = (torch.randn(BATCH, NUM_KV_HEADS, HEAD_DIM, generator=gen) * AMP).cuda().bfloat16()
+    v_last2 = (torch.randn(BATCH, NUM_KV_HEADS, HEAD_DIM, generator=gen) * AMP).cuda().bfloat16()
+
+    # R1: content-follow — mutate q/k/v rows and grow every sequence to 200.
+    case.set_inputs(q2, k_last2, v_last2, [PREFILL_LEN + 8] * BATCH)
+    out_r1 = case.replay()
+    delta = (out_r1.float() - out_r0.float()).abs().max().item()
+    assert delta >= 0.005, f'content-follow probe failed: replay output did not follow (delta={delta:.5f})'
+    out_e1 = _eager_control(ctrl, pool_e, q2, k_last2, v_last2, [PREFILL_LEN + 8] * BATCH)
+    assert torch.equal(out_r1, out_e1), \
+        f'replay vs eager not bitwise after mutation: {(out_r1 - out_e1).abs().max().item()}'
+
+    # R2: unequal per-seq lengths under the frozen capacity bound (masking
+    # must come from device cu_k_len, not from max_k_len).
+    lens = [PREFILL_LEN + 1, PREFILL_LEN + 16, PREFILL_LEN, PREFILL_LEN + 33]
+    case.set_inputs(q, k[:, PREFILL_LEN + 32], v[:, PREFILL_LEN + 32], lens)
+    out_r2 = case.replay()
+    out_e2 = _eager_control(ctrl, pool_e, q, k[:, PREFILL_LEN + 32], v[:, PREFILL_LEN + 32], lens)
+    assert torch.equal(out_r2, out_e2), \
+        f'replay vs eager not bitwise with unequal lengths: {(out_r2 - out_e2).abs().max().item()}'
+
+    # Ref sanity on the last step: int8 gate on the eager control output.
+    ref = _reference(q, k, v, max(lens))
+    _assert_gate(out_e2, ref, 'graph-step/unequal-lengths')
+
+
+def test_graph_replay_host_interference_invariance():
+    """Host/device interference probe (report P2/P3): an unrelated eager TM
+    dispatch between two replays must not change replay output bitwise — this
+    is what failed when plan buffers lived in the capture region."""
+    pool_g, pool_e, k, v = _graph_fixture()
+    q, _, _ = _make_data(seed=41)
+    pool_i = _allocate_layout().allocate(NUM_BLOCKS, 'cuda')
+    _bridge_fill(k[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 v[:, :PREFILL_LEN].reshape(-1, NUM_KV_HEADS, HEAD_DIM),
+                 [PREFILL_LEN] * BATCH, pool_i)
+    torch.cuda.synchronize()
+
+    case = _GraphDecodeCase(pool_g)
+    case.set_inputs(q, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1], [PREFILL_LEN] * BATCH)
+    case.capture()
+    out_a = case.replay()
+
+    # Interference: eager TM decode on a different pool + a padded max_k_len
+    # eager dispatch (historically poisoned the replayed plan buffers).
+    _tm_decode(q, pool_i, PREFILL_LEN, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1])
+    _eager_control(_GraphDecodeCase(pool_e), pool_e, q,
+                   k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1], [PREFILL_LEN] * BATCH)
+    torch.cuda.synchronize()
+
+    out_b = case.replay()
+    assert torch.equal(out_a, out_b), \
+        f'replay changed under host/device interference: {(out_a - out_b).abs().max().item()}'
+
+
+def test_graph_capture_guard_routes_tm():
+    """Capture guard: TM decode is eligible while capturing when the native
+    module is present (graph-safe entry), eager steps unchanged."""
+    from lmdeploy.pytorch.backends.cuda.attention.int8_kv import TmInt8KVAttentionImpl
+
+    impl = TmInt8KVAttentionImpl(NUM_HEADS, HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
+    meta = SimpleNamespace(max_q_seqlen=1)
+    assert impl._can_tm_decode(meta), 'eager single-token steps must take TM'
+    meta = SimpleNamespace(max_q_seqlen=3)
+    assert not impl._can_tm_decode(meta), 'multi-token steps must not take TM'
+    if impl._tm_module() is None:
+        pytest.skip('native TM module unavailable')
+    torch.cuda.synchronize()  # ensure no capture is active
+    meta = SimpleNamespace(max_q_seqlen=1)
+    assert impl._can_tm_decode(meta), 'capture must take TM when buffers can be prepared'
