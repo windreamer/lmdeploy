@@ -188,3 +188,102 @@ ______________________________________________________________________
 | `benchmark/gdn_layout_results.json`                | 本节原始数据                                                             |
 
 未 commit、未 push。
+
+
+______________________________________________________________________
+
+# 附:TM KV 融合写 kernel 评测(TMWriteBench,`_tm.tm_process_kv` vs PT triton INT8)
+
+日期:2026-11-17 · GPU:RTX 3090(独占) · 分支 `graft/w4a16-core`。
+产物:`benchmark/bench_tm_write.py`、`benchmark/bench_tm_write_results.json`、
+排错档案 `benchmark/b304_debug/tm_write_repro/`(NOTES.md + 最小复现 +
+插桩 kernel + 旁路 pybind 模块)。
+
+## 总判定
+
+**写入路径可嫁接,且各形状全面胜出;「q_len=1 非法访存」不是 kernel 缺陷,
+是调用方把 int64 累积长度数组喂给了 `const int*` 形参。** 修复一行:构造
+链路全程 int32。kernel、binding、上游代码零改动。
+
+## q_len=1 根因定位(行级)
+
+| 环节 | 位置 | 事实 |
+| --- | --- | --- |
+| 错误浮现点 | `kv_cache_utils_v2.cu:306` | launch 后 `TM_CUDA_CHECK(cudaGetLastError())`,异步 IMA 在此上报(非 fault 点) |
+| fault 指令 | `kv_cache_utils_v2.cu:191` | `Store(&k_cache[di], out_K)` 8 字节野写,memcheck 报 misaligned `0xbd83…cc93` |
+| 野指针来源 | `block.h:111` | `block = block_ptrs[block_id]`,block_id 由垃圾 k_len 推出(如 ti=384 → blkidx=6 → 表项 18 ≥ 16 项) |
+| 垃圾来源 | 调用方 cu 数组 dtype | `torch.cumsum(int32)` **提升 int64**;`pad(cumsum(...))` 保持 int64;kernel 按 `const int*` 读出交错序列 `[v0,0,v1,0,…]` |
+| 实测读值 | kernel 内打印 | cu_q 读成 `[0,0,1,0,2]`(真值 `[0,1,2,3,4]`);batch2 q_len=-1、batch3 k_len=386 |
+| 修复 | helper 一行 | 全程 int32(例:`benchmark/b304_debug/tm_write_repro/repro_tm_write_int64.py::cu_int32`) |
+
+证据链:同源码独立编译(driver + cudaMalloc + 阻塞 memcpy)参数全对、零错误;
+自建旁路 pybind 模块(无 ContextGuard/from_dlpack)同样崩溃 ⟹ 与 binding 机制
+无关;int32 构造后同 binding 同形状无崩溃且逐字节落位正确。
+
+## 波及面(已有 helper 全部中招)
+
+`benchmark/b304_graph_reverify/common.py::cu`、
+`tests/pytorch/kernel/test_tm_int8_kv.py::_cu` 等均为 int64。均匀 batch prefill
+下交错值仍可让写入发生,宽松的自洽门(池反量化 ref)放行:e1 第一门
+argmatch=0.0 即旁证。复核 e1 风格 prefill 的原始偏移逐字节比对,code match
+仅 0.67%(写入错位)。下游需统一改 int32 并把门禁改回「池 vs 源」比对。
+
+## 正确性对照(池哨兵 0xCC + 反量化逐字节校验,预算 0.03)
+
+| 形状 | host ref | TM 融合写 | PT triton + 转录 | 附加野写 |
+| --- | --- | --- | --- | --- |
+| prefill T=128 | 0.0120 | 0.0225 | 0.0120(与 host 位级同) | 0 |
+| prefill T=512 | 0.0178 | 0.0234 | 0.0178 | 0 |
+| prefill T=2048 | 0.0178 | 0.0234 | 0.0178 | 0 |
+| decode m=1, kv=128→129 | — | 0.0181 | — | 0 |
+| decode m=8, kv=128→136 | — | 0.0241 | — | 0 |
+| decode m=32, kv=128→160 | — | 0.0210 | — | 0 |
+| decode m=1, kv=192→193(报告崩溃形状) | — | 0.0166 | 0.0104 | 0 |
+| decode m=8, kv=448→456 | — | 0.0208 | 0.0117 | 0 |
+| decode m=32, kv=704→736 | — | 0.0236 | — | 0 |
+| decode m=1, kv=129→130(非对齐) | — | 0.0197 | 0.0099 | 0 |
+
+TM 比 PT/host 高 0.005~0.006:kernel 的 (scale,min) 参数落池为 bf16 的舍入差,
+方向一致、预算内。PT 转录缝与 host 位级一致。反量化误差随 AMP=0.5 数据的
+int8 量化底噪(≈255 分之一 × 动态范围)一致。
+
+## 性能对照(median of 50,预热 10,单流)
+
+| 形状 | TM 融合写 ms | PT triton INT8 ms | TM/PT |
+| --- | --- | --- | --- |
+| prefill T=128 | 0.031 | 0.127 | **4.1×** |
+| prefill T=512 | 0.039 | 0.125 | **3.2×** |
+| prefill T=2048 | 0.083(303 GB/s 有效) | 0.171(147 GB/s) | **2.1×** |
+| decode m=1, kv=192 | 0.052 | 0.146 | **2.8×** |
+| decode m=8, kv=448 | 0.025 | 0.146 | **5.9×** |
+| decode m=32, kv=704 | 0.026 | 0.146 | **5.7×** |
+
+decode 段 PT 恒 ~0.15 ms,是 triton 量化核 + scatter 的固定开销;TM 融合写
+把 quant+scatter 合一,小批追加收益最大。TM 的 m=1 略高于 m=8(0.052 vs
+0.025),为 q_len=1 网格(x=1)下的固定代价,仍比 PT 快 2.8×。
+
+## rope 开关
+
+binding 只暴露 null rope(调用方预旋转)。独立编译同 kernel 实测
+(T=2048,B=4,H=8,D=128,int8):null 0.585 ms/iter,linear rope 0.669 ms/iter
+(**+14.4%**,纯寄存器三角函数,访存不变)。生产引擎带 rope_param,嫁接时
+该差价已包含在 kernel 内,无额外路径成本。
+
+## 嫁接可行性判定
+
+1. **判定:值得嫁接。** 正确性全形状通过;性能全形状胜出(prefill 2.1~4.1×,
+   decode 追加 2.8~5.9×);PT 侧只需保留 zero→min 转录或直接改读 (scale,min)。
+2. **前置条件(硬)**:cu_q_len/cu_k_len/cu_block_base 必须 int32 且对 launch
+   流可见;调用方 helper 全部改 int32(上游 `unified_attention_layer` 的
+   engine 缓冲本为 int32,不受此 bug 影响)。
+3. **rope**:bench binding 仅 null;引擎路径带 rope,kernel 原生支持,差价 +14%。
+4. **布局**:写入遵守 `block::Layout`(per-head [K\|V] codes + per-head
+   [Kp\|Vp] params);读取方(PT paged-attention 视图/ATen writer)需同布局。
+
+## 遗留
+
+- 下游修复票:统一 harness helper 的 int32 构造(common.py `cu`、tests `_cu`),
+  并复核 e1/e3/b304 系列「绿门」的实际效力(存在自洽假绿,argmatch=0.0)。
+- `bench_tm_write.py` 的 PT decode 路径在 m=1 时固定 ~0.15 ms,如需进一步
+  压可考虑量化核融合,非本票范围。
+- rope-on 的 binding 入口未暴露;引擎嫁接时直接走 engine rope_param。

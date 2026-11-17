@@ -1,0 +1,214 @@
+{
+  "correctness": [
+    {
+      "shape": "prefill_T128",
+      "writer": "host",
+      "dequant_max_abs": 0.01202,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T128",
+      "writer": "tm",
+      "dequant_max_abs": 0.02246,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T128",
+      "writer": "pt",
+      "dequant_max_abs": 0.01202,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T512",
+      "writer": "host",
+      "dequant_max_abs": 0.01782,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T512",
+      "writer": "tm",
+      "dequant_max_abs": 0.02344,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T512",
+      "writer": "pt",
+      "dequant_max_abs": 0.01782,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T2048",
+      "writer": "host",
+      "dequant_max_abs": 0.01782,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T2048",
+      "writer": "tm",
+      "dequant_max_abs": 0.02344,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "prefill_T2048",
+      "writer": "pt",
+      "dequant_max_abs": 0.01782,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m1_kv128",
+      "writer": "tm",
+      "dequant_max_abs": 0.01807,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m8_kv128",
+      "writer": "tm",
+      "dequant_max_abs": 0.02411,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m32_kv128",
+      "writer": "tm",
+      "dequant_max_abs": 0.021,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m1_kv192",
+      "writer": "tm",
+      "dequant_max_abs": 0.0166,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m8_kv448",
+      "writer": "tm",
+      "dequant_max_abs": 0.02075,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m32_kv704",
+      "writer": "tm",
+      "dequant_max_abs": 0.02356,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m1_kv129",
+      "writer": "tm",
+      "dequant_max_abs": 0.01971,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m1_kv192",
+      "writer": "pt",
+      "dequant_max_abs": 0.01038,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m8_kv448",
+      "writer": "pt",
+      "dequant_max_abs": 0.01172,
+      "collateral_bytes": 0,
+      "ok": true
+    },
+    {
+      "shape": "decode_m1_kv129",
+      "writer": "pt",
+      "dequant_max_abs": 0.00989,
+      "collateral_bytes": 0,
+      "ok": true
+    }
+  ],
+  "perf": [
+    {
+      "shape": "prefill_T128",
+      "tm_ms": 0.0308,
+      "pt_ms": 0.1269,
+      "tm_gbps": 51.0,
+      "pt_gbps": 12.4
+    },
+    {
+      "shape": "prefill_T512",
+      "tm_ms": 0.0389,
+      "pt_ms": 0.1249,
+      "tm_gbps": 161.7,
+      "pt_gbps": 50.4
+    },
+    {
+      "shape": "prefill_T2048",
+      "tm_ms": 0.0829,
+      "pt_ms": 0.1709,
+      "tm_gbps": 303.4,
+      "pt_gbps": 147.3
+    },
+    {
+      "shape": "decode_m1_kv192",
+      "tm_ms": 0.0522,
+      "pt_ms": 0.1464,
+      "tm_gbps": 0.2,
+      "pt_gbps": 0.1
+    },
+    {
+      "shape": "decode_m8_kv448",
+      "tm_ms": 0.0246,
+      "pt_ms": 0.1456,
+      "tm_gbps": 4.0,
+      "pt_gbps": 0.7
+    },
+    {
+      "shape": "decode_m32_kv704",
+      "tm_ms": 0.0256,
+      "pt_ms": 0.1463,
+      "tm_gbps": 15.4,
+      "pt_gbps": 2.7
+    }
+  ],
+  "int64bug": [
+    {
+      "shape": "m1_kv192",
+      "status": "CRASH",
+      "error": "CUDA error: an illegal memory access was encountered\nSearch for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES."
+    },
+    {
+      "shape": "m1_kv128",
+      "status": "CRASH",
+      "error": "CUDA error: an illegal memory access was encountered\nSearch for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES."
+    },
+    {
+      "shape": "m8_kv128",
+      "status": "CRASH",
+      "error": "CUDA error: an illegal memory access was encountered\nSearch for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES."
+    },
+    {
+      "shape": "m32_kv128",
+      "status": "CRASH",
+      "error": "CUDA error: an illegal memory access was encountered\nSearch for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES."
+    },
+    {
+      "shape": "m1_kv448",
+      "status": "CRASH",
+      "error": "CUDA error: an illegal memory access was encountered\nSearch for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES."
+    },
+    {
+      "shape": "m256_kv0",
+      "status": "WRONG-CONTENT",
+      "dequant_max_abs": 21925724160.0,
+      "collateral_bytes": 0
+    }
+  ]
+}
