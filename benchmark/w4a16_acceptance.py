@@ -1126,8 +1126,8 @@ def run_int8kv_suite(model_path: str | None, out_dir: str | None, batches: str =
     lm_logger.setLevel(logging.DEBUG)
     source_state = _tm_int8_kv_source_state()
     routes = dict(
-        int8kv_tm_layout_on=dict(quant_policy='INT8', env={INT8_KV_KNOB: 'on'}),
         int8kv_stock_off=dict(quant_policy='INT8', env={INT8_KV_KNOB: 'off'}),
+        int8kv_tm_layout_on=dict(quant_policy='INT8', env={INT8_KV_KNOB: 'on'}),
     )
     try:
         report = run_route_pair_suite(

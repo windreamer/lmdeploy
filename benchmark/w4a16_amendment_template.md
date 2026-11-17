@@ -78,7 +78,7 @@ The rung suites emit this shape automatically
 | throughput table     | b ∈ {1, 8, 32}, TM/Triton per batch        | b ∈ {1, 8, 32}, on/off per batch                    | skip reasons per rung       |
 | smoke tier           | b=1, 8 tokens, 0 timed passes              | same                                                | n/a                         |
 | placement            | `reports/w4a16/b306_moe/`                  | `reports/w4a16/b306_int8kv/`                        | `reports/w4a16/b306_tp2/`   |
-| known blockers       | none                                       | source defects 1-4 (`benchmark/b3_06_report.md` §2) | single-GPU host; H200 item  |
+| known blockers           | none                                         | none on the fixed source; a fixed/PRESENT probe guards stale checkouts | single-GPU host; H200 item |
 
 Amendment rule for the int8-KV threshold: same procedure as sections 2-4 —
 first measured on/off distribution fixes the number, the constant
