@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 # Copyright (c) OpenMMLab. All rights reserved.
 from .deepseek_v4_tool_parser import DeepSeekV4ToolParser
 from .deepseek_v32_tool_parser import DeepSeekV32ToolParser
@@ -27,3 +28,27 @@ __all__ = [
     'InternS2PreviewToolParser',
     'KimiK2ToolParser',
 ]
+||||||| Stash base
+=======
+# Copyright (c) OpenMMLab. All rights reserved.
+from .glm47_tool_parser import Glm47ToolParser
+from .internlm2_tool_parser import Internlm2ToolParser
+from .llama3_tool_parser import Llama3JsonToolParser
+from .qwen2d5_tool_parser import Qwen2d5ToolParser
+from .qwen3_tool_parser import Qwen3ToolParser
+from .qwen3coder_tool_parser import Qwen3CoderToolParser
+from .tool_parser import ToolParser, ToolParserManager
+from .xml_tool_parser import XmlToolParser
+
+__all__ = [
+    'ToolParser',
+    'ToolParserManager',
+    'XmlToolParser',
+    'Glm47ToolParser',
+    'Internlm2ToolParser',
+    'Llama3JsonToolParser',
+    'Qwen2d5ToolParser',
+    'Qwen3ToolParser',
+    'Qwen3CoderToolParser',
+]
+>>>>>>> Stashed changes
