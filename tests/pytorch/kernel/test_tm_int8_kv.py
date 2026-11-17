@@ -135,16 +135,22 @@ def _bridge_fill(k_slice, v_slice, kv_seqlens, pool, layer=0):
         stream_ptr=torch.cuda.current_stream().cuda_stream)
 
 
-def _tm_decode(q, pool, klen, layer=0):
+def _tm_decode(q, pool, klen, k_last, v_last, layer=0):
     from lmdeploy.pytorch.backends.tm_kv import tm_block_pointer_table
     from lmdeploy.turbomind import _tm
 
     k_cache = _layer_views(pool, layer)[0]
     ptrs, cu_block_base = tm_block_pointer_table(_block_offsets(), k_cache.data_ptr(), k_cache.stride(0))
-    cu = _cu([klen // BLOCK_LEN] * BATCH)
+    # The pointer table is row-major over block_offsets columns (C wide); the
+    # kernel's cu_block_base must use that stride, not klen // BLOCK_LEN.
+    # Passing a per-sequence block-count cumsum shifts every batch b > 0's
+    # base by b, so its ti = history_len store lands in the wrong block.
+    cu = _cu([_block_offsets().shape[1]] * BATCH).int()
     out = torch.empty(BATCH, NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16, device='cuda')
     _tm.tm_attn_decode(
         _tm.from_dlpack(q.reshape(BATCH, -1).contiguous()),
+        _tm.from_dlpack(k_last.reshape(BATCH, -1).contiguous()),
+        _tm.from_dlpack(v_last.reshape(BATCH, -1).contiguous()),
         _tm.from_dlpack(out),
         ptrs.data_ptr(), cu.data_ptr(),
         num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
@@ -234,7 +240,7 @@ def test_bridge_write_and_tm_decode_matches_reference():
                  [PREFILL_LEN] * BATCH, pool)
     torch.cuda.synchronize()
 
-    out = _tm_decode(q, pool, PREFILL_LEN)
+    out = _tm_decode(q, pool, PREFILL_LEN, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1])
     ref = _reference(q, k, v, PREFILL_LEN)
     max_abs, kl, argmatch = _assert_gate(out, ref, 'tm-decode/prefill')
 
@@ -259,31 +265,25 @@ def test_pt_reader_on_tm_pool():
     ref = _reference(q, k, v, PREFILL_LEN)
     max_abs, kl, _ = _assert_gate(out_pt, ref, 'pt-reader/prefill')
 
-    out_tm = _tm_decode(q, pool, PREFILL_LEN)
+    out_tm = _tm_decode(q, pool, PREFILL_LEN, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1])
     cross = (out_pt.float() - out_tm.float()).abs().max().item()
     print(f'\npt-reader/prefill: max_abs={max_abs:.4f} KL={kl:.3e} vs-tm={cross:.4f}')
     assert cross <= 0.25, 'both readers must stay within the int8 max_abs budget'
 
 
-@pytest.mark.xfail(strict=True, reason='B3-04: tm_attn_decode zero-writes the last valid '
-                      "position's KV (codes+params, all heads, K and V) on every call — "
-                      'bench-binding contract violation, see benchmark/b304_debug/NOTES.md')
 def test_mixed_chain_prefill_then_decode():
     """B3-01's core assertion on the production path: one pool receives a
     prefill append then real one-token decode appends, and both readers stay
     correct over the full length.
 
-    Currently xfailed on a kernel-side defect, NOT the ATen writer: the ATen
-    writer's placement is byte-exact for packed feeds (see
-    test_aten_writer_multi_batch_packed_placement). The decode binding
-    (src/turbomind/python/attn_bench_bind.cpp, BuildDecodePlan) sets
-    readonly_block_num = nullptr and wires params.k/v into a Q-only qkv
-    workspace, so the universal kernel's kProcessKV branch
+    The decode binding (src/turbomind/python/attn_bench_bind.cpp,
+    BuildDecodePlan) fills params.k/v with the real K/V segments and
+    readonly_block_num with a valid zero buffer (production convention,
+    commit 45e9322c), so the universal kernel's kProcessKV branch
     (src/turbomind/kernels/attention/attention_universal.h:59 — kProcessKV is
-    hardcoded true for DecodingCtaMap) stores "converted" K/V of the empty
-    workspace rows back into the pool at ti = history_len: the last valid
-    position of every sequence is zeroed on every decode call. The in-loop
-    decodes therefore corrupt exactly the slots this test round-trips.
+    hardcoded true for DecodingCtaMap) re-stores the token's own converted
+    K/V at ti = history_len: idempotent on the pool (the re-store writes
+    the token's own converted K/V back).
     """
     _, k, v = _make_data()
     q, _, _ = _make_data(seed=7)
@@ -314,7 +314,7 @@ def test_mixed_chain_prefill_then_decode():
                          _block_offsets())
         torch.cuda.synchronize()
         if step in (0, DECODE_STEPS - 1):
-            out = _tm_decode(q, pool, kv_now)
+            out = _tm_decode(q, pool, kv_now, k[:, kv_now - 1], v[:, kv_now - 1])
             ref = _reference(q, k, v, kv_now)
             _assert_gate(out, ref, f'tm-decode/decode-step-{step}')
 
@@ -325,7 +325,7 @@ def test_mixed_chain_prefill_then_decode():
     tail_err = (kq[:, PREFILL_LEN:] - kt_full[:, PREFILL_LEN:]).abs().max().item()
     assert tail_err <= 0.05, 'decode-appended tail must round-trip'
 
-    out = _tm_decode(q, pool, KLEN)
+    out = _tm_decode(q, pool, KLEN, k[:, KLEN - 1], v[:, KLEN - 1])
     _assert_gate(out, _reference(q, k, v, KLEN), 'tm-decode/mixed-full')
     out_pt = _pt_decode(q, pool, KLEN)
     _assert_gate(out_pt, _reference(q, k, v, KLEN), 'pt-reader/mixed-full')
@@ -362,7 +362,7 @@ def test_aten_writer_pool_decodes():
     assert (vq[:, :PREFILL_LEN] - vt[:, :PREFILL_LEN]).abs().max().item() <= 0.05
     assert kq[:, PREFILL_LEN:].abs().max().item() == 0.0
 
-    out = _tm_decode(q, pool, PREFILL_LEN)
+    out = _tm_decode(q, pool, PREFILL_LEN, k[:, PREFILL_LEN - 1], v[:, PREFILL_LEN - 1])
     _assert_gate(out, _reference(q, k, v, PREFILL_LEN), 'tm-decode/aten-writer')
     out_pt = _pt_decode(q, pool, PREFILL_LEN)
     _assert_gate(out_pt, _reference(q, k, v, PREFILL_LEN), 'pt-reader/aten-writer')

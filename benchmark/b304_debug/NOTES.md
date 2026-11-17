@@ -58,3 +58,25 @@ kernel-side defect (xfailed, owned by src/turbomind).
 - initcheck: 2048 uninitialized-global reads, all inside the TM decode
   kernel's kProcessKV workspace reads (same defect as item 3); ATen writer
   and torch ops clean.
+
+## \[DEBUG-b304b\] Root cause: decode tail round-trip mismatch (mixed-chain)
+
+- Symptom: tail_err 2.3-2.6 vs 0.05 budget; decode-appended slots corrupted.
+- Hypotheses ranked: (1) kernel quant convention mismatch, (2) ti off-by-one,
+  (3) writer placement. All falsified: decode's own store at ti = history_len
+  writes batch 0 correctly (dequant err ~0.005, kernel-quant rounding only).
+- Decisive probe (probe_decisive2.py, probe_pos3.py): the kernel wrote batch 1's
+  token into batch 1 block 2 slot 0 (pos 128), batch 2 into pos 64, batch 3 into
+  pos 0 — exactly ptrs\[cu_block_base\[b\] + ti // 64\] with cu_block_base\[b\] = 3b.
+- Root cause (test helper, not kernel/writer): `_tm_decode` passed
+  `cu = _cu([klen // BLOCK_LEN])` (cumulative per-seq block counts, stride 3)
+  as cu_block_nums, but `tm_block_pointer_table` returns a row-major table with
+  C = KLEN // BLOCK_LEN = 4 columns whose bases are `[0, 4, 8, 12]`. Every
+  batch b > 0 had its block pointers shifted by b, so its history_len store
+  (and reads) landed in the wrong physical blocks. Batch 0 (base 0) was always
+  right, masking single-batch tests.
+- Fix: tests/pytorch/kernel/test_tm_int8_kv.py `_tm_decode` now builds cu from
+  the table's column count (`_cu([C] * BATCH)`), matching the bases the table
+  returns. Kernel and writer untouched.
+- Result: mixed-chain green (byte-level tail round-trip within 0.005-0.01
+  kernel-quant noise), full suite 8/8 passed.
