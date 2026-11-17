@@ -64,3 +64,23 @@ order above the ticket 09 impl-level data point (worst 1.9e-4).
 3. `HISTORY/<YYYY-MM>.md` — one decision entry with the measured distribution.
 4. Re-run the gate command from section 2 to confirm the tightened threshold
    holds on the reference pair.
+
+## 5. B3-06 rung report template (MoE / int8-KV / TP=2)
+
+The rung suites emit this shape automatically
+(`benchmark/w4a16_acceptance.py --suite {moe,int8kv,tp2}`, output under
+`reports/w4a16/b306_*/`). Keep the manual backfill fields aligned:
+
+| field                | MoE rung                                   | int8-KV rung                                        | TP=2 rung                   |
+| -------------------- | ------------------------------------------ | --------------------------------------------------- | --------------------------- |
+| routes (ref -> cand) | triton fused_moe (fp16 twin) -> TM grouped | stock int8 KV -> TM int8 block layout               | matrix readiness, no timing |
+| numeric gate         | KL ≤ `MOE_TINY_KL_THRESHOLD`, top-1 report | KL ≤ 2e-3, top-1 report                             | n/a (declaration)           |
+| throughput table     | b ∈ {1, 8, 32}, TM/Triton per batch        | b ∈ {1, 8, 32}, on/off per batch                    | skip reasons per rung       |
+| smoke tier           | b=1, 8 tokens, 0 timed passes              | same                                                | n/a                         |
+| placement            | `reports/w4a16/b306_moe/`                  | `reports/w4a16/b306_int8kv/`                        | `reports/w4a16/b306_tp2/`   |
+| known blockers       | none                                       | source defects 1-4 (`benchmark/b3_06_report.md` §2) | single-GPU host; H200 item  |
+
+Amendment rule for the int8-KV threshold: same procedure as sections 2-4 —
+first measured on/off distribution fixes the number, the constant
+`INT8_KV_KL_THRESHOLD` in `benchmark/w4a16_acceptance.py` is the single
+backfill target.
