@@ -42,6 +42,7 @@ from lmdeploy.pytorch.weight_loader.model_weight_loader import (
     ModelWeightLoader,
     load_model_weights,
     normalize_ct_weights,
+    normalize_gptq_weights,
     process_weights_after_loading,
 )
 from lmdeploy.serve.openai.protocol import (
@@ -1513,10 +1514,7 @@ class BaseModelAgent:
         patched_model = build_patched_model(self.model_config, device=device, build_model_ctx=build_model_ctx)
         logger.debug(msg_with_rank(rank, 'loading weights.'))
         if not self.misc_config.empty_init:
-            quant_config = self.model_config.quant_config
-            normalize_ct = (getattr(quant_config, 'quant_method', None) == 'compressed-tensors'
-                            and getattr(quant_config, 'group_size', None) == 128)
-            load_model_weights(patched_model, model_path, device=device, normalize_ct=normalize_ct)
+            load_model_weights(patched_model, model_path, device=device, normalize_quant=self._load_normalize())
         if adapters is not None:
             logger.debug(msg_with_rank(rank, 'loading adapters.'))
             add_adapters(patched_model, adapters, dtype=self.model_config.dtype, device=device)
@@ -1791,21 +1789,15 @@ class BaseModelAgent:
         """Route HF-named update tensors before model-specific renaming."""
         return self.spec_agent.split_updated_weights(weights)
 
-    def _ct_normalize(self):
-        """Whether weight streams of this model carry group-128 ct keys.
-
-        Group-128 dense ct checkpoints normalize to the canonical AWQ layout at load time; group-32 packed ct keys (MoE
-        experts) are consumed raw and must pass through untouched.
-        """
+    def _load_normalize(self) -> bool:
         quant_config = self.model_config.quant_config
-        return (getattr(quant_config, 'quant_method', None) == 'compressed-tensors'
-                and getattr(quant_config, 'group_size', None) == 128)
+        return quant_config is not None and quant_config.load_normalize()
 
     def _renamed_update_weights(self, weights, target):
-        """Rename one update stream for ``target``, translating ct keys."""
+        """Rename one update stream for ``target``, repacking quant keys."""
         renamed = ModelWeightLoader._rename_weights_iterator(weights, target)
-        if self._ct_normalize():
-            renamed = normalize_ct_weights(renamed)
+        if self._load_normalize():
+            renamed = normalize_gptq_weights(normalize_ct_weights(renamed))
         return list(renamed)
 
     def _load_updated_weight_bucket(self, weights: list[tuple[str, torch.Tensor]], op_name: str):
